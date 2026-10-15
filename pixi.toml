@@ -1,0 +1,80 @@
+[workspace]
+channels = ["conda-forge"]
+name = "psi4-swig-pcm"
+platforms = ["osx-arm64", "linux-64"]
+# Building this package (and depending on it from source, as tautomator does) uses pixi-build,
+# still a preview feature in pixi 0.66.
+preview = ["pixi-build"]
+
+[system-requirements]
+# The Accelerate BLAS selected below needs macOS 15.5 (as in tautomator); linux-64 ignores it.
+macos = "15.5"
+
+# ------------------------------------------------------------------ the conda package
+# Name and version come from pyproject.toml; pixi-build-python runs scikit-build-core,
+# which runs CMakeLists.txt.
+
+[package.build]
+backend = { name = "pixi-build-python", version = "0.5.*" }
+config = { noarch = false, compilers = ["cxx"] }
+
+[package.host-dependencies]
+python = "3.13.*"
+# Psi4 run-exports psi4 >=1.11,<1.12, so the built package is tied to the Psi4 it was built
+# against without a run-dependency pin here.
+psi4 = "1.11.*"
+pybind11 = "*"
+# psi4/libmints/matrix.h includes Eigen, so Eigen's headers are compiled into the extension.
+# conda-forge's psi4 1.11 is built with Eigen 5.0; keep the same major.
+eigen = "5.*"
+# Only to get through libint2-config.cmake (see CMakeLists.txt); no Boost header is compiled.
+libboost-headers = "*"
+scikit-build-core = ">=0.11"
+cmake = ">=3.19"
+ninja = "*"
+
+[package.run-dependencies]
+psi4 = "1.11.*"
+numpy = "*"
+scipy = ">=1.15"
+
+# ------------------------------------------------------------------ development environments
+
+[dependencies]
+python = "3.13.*"
+psi4 = "1.11.*"
+# This repository's own package, built by pixi-build and installed editable.
+psi4-swig-pcm = { path = "." }
+pytest = ">=9.0.3,<10"
+mypy = ">=1.20.0,<2"
+ruff = ">=0.11,<1"
+
+[target.osx-arm64.dependencies]
+# Apple's Accelerate instead of OpenBLAS, as in tautomator's psi4 environment.
+libblas = { version = "*", build = "*_newaccelerate" }
+
+[tasks]
+lint = "ruff check src/ tests/"
+format = "ruff format src/ tests/"
+format-check = "ruff format --check src/ tests/"
+typecheck = "mypy src/ tests/"
+check = { depends-on = ["lint", "format-check", "typecheck"] }
+test = { cmd = "pytest -m 'not slow and not pyscf'", env = { OMP_NUM_THREADS = "4" } }
+test-slow = { cmd = "pytest -m 'slow and not pyscf'", env = { OMP_NUM_THREADS = "4" } }
+
+# PySCF 2.11 as the reference implementation.  The PyPI wheel on purpose: conda-forge pyscf
+# < 2.13 needs xcfun built against pybind11-abi 4, which cannot share an environment with
+# Psi4 1.11 (abi 11).  Import psi4 before pyscf in any process that uses both: the wheel's
+# bundled libxc otherwise shadows Psi4's.
+[feature.crosscheck.pypi-dependencies]
+pyscf = "==2.11.0"
+
+[feature.crosscheck.dependencies]
+# PySCF 2.11's lib.einsum (>= 3 operands) breaks on numpy 2.4+.
+numpy = "2.3.*"
+
+[feature.crosscheck.tasks]
+crosscheck = { cmd = "pytest -m pyscf", env = { OMP_NUM_THREADS = "4" } }
+
+[environments]
+crosscheck = ["crosscheck"]

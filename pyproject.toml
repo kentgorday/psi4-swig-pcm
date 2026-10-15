@@ -1,0 +1,43 @@
+[build-system]
+requires = ["scikit-build-core>=0.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "psi4-swig-pcm"
+version = "0.1.0"
+description = "Switching/Gaussian (Lange-Herbert) PCM with analytic nuclear gradients for Psi4"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "LGPL-3.0-only AND Apache-2.0"
+license-files = ["COPYING", "COPYING.LESSER", "LICENSES/Apache-2.0.txt", "NOTICE"]
+authors = [{ name = "Kent Gorday" }]
+# Psi4 itself (1.11.x) comes from conda-forge; it is not on PyPI.  The pixi package
+# in pixi.toml declares it.
+dependencies = ["numpy", "scipy>=1.15"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.packages = ["src/psi4_swig_pcm"]
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["psi4", "psi4.*", "scipy", "scipy.*", "pyscf", "pyscf.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: finite-difference checks, optimizations and frequencies (minutes)",
+    "pyscf: compares against PySCF; runs in the crosscheck environment",
+]

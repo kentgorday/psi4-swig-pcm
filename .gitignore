@@ -1,0 +1,12 @@
+.pixi/
+build/
+__pycache__/
+*.so
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+# Psi4 leaves these in the working directory
+timer.dat
+psi.*.clean
+*.out

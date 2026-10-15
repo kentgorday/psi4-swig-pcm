@@ -61,6 +61,15 @@ def permutation(ws: Any, surf: cav.Surface) -> IntArray:
     return out
 
 
+def test_default_radii_are_pyscfs() -> None:
+    """modified_bondi_radii() is the radii table PySCF's PCM uses by default, every element."""
+    from pyscf.data import radii
+
+    ws = pcm.PCM(pyscf_mol("formate", "sto-3g"))
+    expected = ws.vdw_scale * pcm.modified_Bondi + ws.r_probe / radii.BOHR
+    np.testing.assert_allclose(cav.modified_bondi_radii(), expected, rtol=1e-15, atol=0)
+
+
 @pytest.mark.parametrize("name", ["formate", "acetone", "glycine_zwitterion"])
 def test_surface_matches_pyscf(name: str) -> None:
     _, ws = pyscf_pcm(name, "C-PCM")

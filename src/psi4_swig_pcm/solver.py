@@ -6,20 +6,23 @@ With the SCF option DDX on, scf_helper builds ``procrouting.solvent.ddx.DdxInter
 options=, basisset=)`` and scf_iterator calls ``get_solvation_contributions(D, state)`` with
 the total density, adding the returned energy and pushing the returned matrix onto the Fock
 matrix.  PCMSolver provides that interface; driver.enable() puts it in the slot.
+
+The cavity is built from the real atoms only: ghost atoms (counterpoise monomers in the dimer
+basis) carry basis functions but no sphere, so a monomer sits in its own cavity.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike
 from psi4 import core
 
 from . import cavity as cav
-from .cavity import FloatArray, Method
+from .cavity import IntArray, Method
 from .charges import GaussianCharges
 
 log = logging.getLogger(__name__)
@@ -29,20 +32,37 @@ log = logging.getLogger(__name__)
 GAUSS_TOLERANCE = 1e-2
 
 
+def _default_radii() -> tuple[float, ...]:
+    return tuple(float(r) for r in cav.modified_bondi_radii())
+
+
 @dataclass(frozen=True)
 class PCMSettings:
+    """PCM model and numerical settings.
+
+    radii: cavity radius in bohr by atomic number (index 0 unused), any sequence; stored as a
+    tuple so that the settings stay immutable, comparable and hashable.  The default is
+    cavity.modified_bondi_radii(): PySCF's modified Bondi x 1.2, hydrogen 1.10 A.
+    incore_mb: memory (MB) the stored (k|mn) integrals may take per geometry, on top of what
+    Psi4 is given with set_memory; 0 computes them directly every SCF iteration instead.
+    """
+
     method: Method = "IEF-PCM"  # SS(V)PE (symmetrized K) is the same continuum model
-    eps: float = 78.3553  # water
+    eps: float = 78.3553  # water; float("inf") for a conductor
     lebedev_order: int = 29  # 302 points per sphere (PySCF default)
     check: bool = True  # per-geometry numerical checks, as PCMSolver does
-    incore_mb: float = 2000.0  # store (k|mn) per geometry if it fits (MB); 0 = always direct
-    radii: FloatArray = field(default_factory=cav.modified_bondi_radii, compare=False, hash=False)
+    incore_mb: float = 2000.0
+    radii: tuple[float, ...] = field(default_factory=_default_radii)
 
     def __post_init__(self) -> None:
         if self.method not in cav.METHODS:
             raise ValueError(f"method must be one of {cav.METHODS}, not {self.method!r}")
         if self.lebedev_order not in cav.LEBEDEV_POINTS:
             raise ValueError(f"lebedev_order must be one of {sorted(cav.LEBEDEV_POINTS)}")
+        if not self.eps >= 1.0:  # also rejects NaN
+            raise ValueError(f"eps must be >= 1 (inf for a conductor), not {self.eps!r}")
+        radii: ArrayLike = self.radii
+        object.__setattr__(self, "radii", tuple(float(r) for r in np.asarray(radii).ravel()))
 
 
 def check_diagnostics(d: cav.Diagnostics, method: Method) -> None:
@@ -52,17 +72,15 @@ def check_diagnostics(d: cav.Diagnostics, method: Method) -> None:
     # SS(V)PE's symmetrized K violates Gauss's law by 4-24% on multi-sphere cavities by
     # construction, so only C-PCM / COSMO / IEF-PCM are held to it.
     if abs(d.gauss_nuclear_relerr) > GAUSS_TOLERANCE and method != "SS(V)PE":
-        log.warning(
-            "PCM nuclear surface charge violates Gauss's law by %.2e (%s)",
-            d.gauss_nuclear_relerr,
-            d,
+        message = (
+            f"PCM nuclear surface charge violates Gauss's law by {d.gauss_nuclear_relerr:.2e}"
         )
+        log.warning("%s (%s)", message, d)
+        core.print_out(f"    Warning: {message}\n")
 
 
 class PCMSolver:
     """Duck-types psi4's DdxInterface: get_solvation_contributions(D, state) -> (E, V, state)."""
-
-    last: ClassVar[PCMSolver | None] = None  # the solver of the most recent SCF
 
     def __init__(
         self,
@@ -72,29 +90,50 @@ class PCMSolver:
         basisset: core.BasisSet,
     ) -> None:
         self.settings, self.basis = settings, basisset
-        natm = molecule.natom()
-        xyz = np.asarray(molecule.geometry().np)
-        true_Z = [molecule.true_atomic_number(i) for i in range(natm)]
+        # Ghost atoms have Z() == 0 but keep their element in true_atomic_number().
+        self.atoms: IntArray = np.array(
+            [i for i in range(molecule.natom()) if molecule.Z(i) != 0], dtype=np.intp
+        )
+        if len(self.atoms) == 0:
+            raise ValueError("the PCM needs at least one real (non-ghost) atom")
+        xyz = np.asarray(molecule.geometry().np)[self.atoms]
+        true_Z = [molecule.true_atomic_number(int(i)) for i in self.atoms]
         # Electrons see ECP-reduced nuclear charges; psi4 has already applied them to Z().
-        Z = [molecule.Z(i) for i in range(natm)]
-        t0 = time.perf_counter()
-        self.surf = cav.make_surface(xyz, true_Z, settings.radii, settings.lebedev_order)
+        Z = [molecule.Z(int(i)) for i in self.atoms]
+        self.surf = cav.make_surface(xyz, true_Z, np.array(settings.radii), settings.lebedev_order)
         self.op = cav.PCMOperator(self.surf, settings.method, settings.eps)
         self.phi_nuc = cav.nuclear_potential(self.surf, Z)
-        self.diagnostics = self.op.diagnostics(Z) if settings.check else None
-        if self.diagnostics is not None:
-            check_diagnostics(self.diagnostics, settings.method)
-        self.timings = {"cavity": time.perf_counter() - t0, "phi": 0.0, "solve": 0.0, "V": 0.0}
-        self.calls = 0
-        t1 = time.perf_counter()
         self.charges = GaussianCharges(
             self.surf, core.get_num_threads(), basisset, settings.incore_mb
         )
-        self.timings["integrals_incore"] = (
-            time.perf_counter() - t1 if self.charges.B is not None else 0.0
-        )
+        self.calls = 0
         self.phi = self.q = self.q_sym = np.zeros(self.surf.npts)
-        PCMSolver.last = self
+        self._print_header(molecule.natom())
+        self.diagnostics = self.op.diagnostics(Z) if settings.check else None
+        if self.diagnostics is not None:
+            d = self.diagnostics
+            core.print_out(
+                f"    Nuclear surface charge vs Gauss's law: {d.gauss_nuclear_relerr:+.2e}"
+                f" (relative); rcond(K) {d.rcond_K:.1e}\n"
+            )
+            check_diagnostics(d, settings.method)
+
+    def _print_header(self, natom: int) -> None:
+        s = self.settings
+        ghosts = natom - len(self.atoms)
+        stored = self.charges.B
+        integrals = (
+            f"stored in core ({stored.nbytes / 2**20:.0f} MB)"
+            if stored is not None
+            else "computed directly each iteration"
+        )
+        core.print_out(
+            f"\n  ==> psi4-swig-pcm: {s.method}, eps = {s.eps:.4f} <==\n\n"
+            f"    Cavity: {len(self.atoms)} atoms"
+            + (f" ({ghosts} ghost atoms left out)" if ghosts else "")
+            + f", Lebedev order {s.lebedev_order}, {self.surf.npts} surface points\n"
+            f"    Surface-charge integrals (k|mn): {integrals}\n"
+        )
 
     def get_solvation_contributions(
         self,
@@ -105,17 +144,11 @@ class PCMSolver:
     ) -> tuple[float, core.Matrix, Any]:
         if nonequilibrium:
             raise NotImplementedError("nonequilibrium (optical dielectric) response")
-        t0 = time.perf_counter()
         phi = self.charges.esp(self.basis, D)
         if not elec_only:
             phi = phi + self.phi_nuc
-        t1 = time.perf_counter()
         q, q_sym = self.op.charges(phi)
-        t2 = time.perf_counter()
         V = self.charges.potential_matrix(self.basis, q_sym)
-        self.timings["phi"] += t1 - t0
-        self.timings["solve"] += t2 - t1
-        self.timings["V"] += time.perf_counter() - t2
         self.calls += 1
         if not elec_only:
             self.phi, self.q, self.q_sym = phi, q, q_sym

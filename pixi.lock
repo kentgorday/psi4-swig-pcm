@@ -2259,7 +2259,7 @@ packages:
   - python >=3.13
   - libcxx >=23
   - python_abi 3.13.* *_cp313
-  license: LGPL-3.0-only AND Apache-2.0
+  license: LGPL-3.0-only AND Apache-2.0 AND BSD-3-Clause
 - conda: .
   name: psi4-swig-pcm
   version: 0.1.0
@@ -2276,7 +2276,7 @@ packages:
   - libstdcxx >=16
   - libgcc >=16
   - python_abi 3.13.* *_cp313
-  license: LGPL-3.0-only AND Apache-2.0
+  license: LGPL-3.0-only AND Apache-2.0 AND BSD-3-Clause
 - conda: https://conda.anaconda.org/conda-forge/linux-64/psutil-7.2.2-py313hd42f317_3.conda
   sha256: a7cffeba6c7957cc47f1f28576f39bd04aceb42ab962d5d8c91c3f60fedd304f
   md5: 0bc97f7c2f4a6993798c004fd557e3a1

@@ -20,12 +20,13 @@ config = { noarch = false, compilers = ["cxx"] }
 
 [package.host-dependencies]
 python = "3.13.*"
-# Psi4 run-exports psi4 >=1.11,<1.12, so the built package is tied to the Psi4 it was built
-# against without a run-dependency pin here.
+# The Psi4 the extension is compiled against.  Psi4 run-exports psi4 >=1.11,<1.12 to the
+# built package.
 psi4 = "1.11.*"
 pybind11 = "*"
-# psi4/libmints/matrix.h includes Eigen, so Eigen's headers are compiled into the extension.
-# conda-forge's psi4 1.11 is built with Eigen 5.0; keep the same major.
+# psi4/libmints/matrix.h includes Eigen, so the extension compiles against its headers (no
+# Eigen code ends up in the binary).  conda-forge's psi4 1.11 is built with Eigen 5.0; keep
+# the same major so the headers agree with Psi4's.
 eigen = "5.*"
 # Only to get through libint2-config.cmake (see CMakeLists.txt); no Boost header is compiled.
 libboost-headers = "*"
@@ -34,6 +35,7 @@ cmake = ">=3.19"
 ninja = "*"
 
 [package.run-dependencies]
+# The same pin as Psi4's run-export, stated in case that export ever changes.
 psi4 = "1.11.*"
 numpy = "*"
 scipy = ">=1.15"

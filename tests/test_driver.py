@@ -100,6 +100,52 @@ def test_restricted_open_shell_is_rejected() -> None:
         psi4.gradient("hf", molecule=psi4_molecule("formyl"))
 
 
+def test_failed_enable_leaves_psi4_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    gradient, hessian = dict(procedures["gradient"]), dict(procedures["hessian"])
+
+    def broken(original: object) -> object:
+        raise RuntimeError("broken")
+
+    monkeypatch.setattr(driver, "_wrap_scf_gradient", broken)
+    with pytest.raises(RuntimeError, match="broken"):
+        psi4_swig_pcm.enable()
+    assert psi4_swig_pcm.active_settings() is None
+    assert not core.get_option("SCF", "DDX")
+    assert procedures["gradient"] == gradient
+    assert procedures["hessian"] == hessian
+
+
+def test_psi4_output_reports_the_pcm(tmp_path: Path) -> None:
+    out = tmp_path / "pcm.out"
+    psi4.core.set_output_file(str(out), False)
+    try:
+        psi4.set_options(STO3G)
+        psi4_swig_pcm.enable(PCMSettings(method="C-PCM"))
+        psi4.energy("hf", molecule=psi4_molecule("formate"))
+    finally:
+        psi4.core.be_quiet()
+    text = out.read_text()
+    assert "==> psi4-swig-pcm: C-PCM, eps = 78.3553 <==" in text
+    assert re.search(r"Cavity: 4 atoms, Lebedev order 29, \d+ surface points", text)
+    assert "Nuclear surface charge vs Gauss's law" in text
+
+
+def test_gradient_leaves_no_external_potential_behind() -> None:
+    psi4.set_options(STO3G)
+    psi4_swig_pcm.enable()
+    _, wfn = psi4.gradient("hf", molecule=psi4_molecule("formate"), return_wfn=True)
+    assert wfn.external_pot() is None
+
+
+def test_ghost_atoms_have_no_sphere() -> None:
+    psi4.set_options(STO3G)
+    psi4_swig_pcm.enable()
+    _, alone = psi4.energy("hf", molecule=psi4_molecule("water"), return_wfn=True)
+    _, ghosted = psi4.energy("hf", molecule=psi4_molecule("water_ghost_water"), return_wfn=True)
+    assert ghosted.ddx.surf.npts == alone.ddx.surf.npts
+    np.testing.assert_array_equal(ghosted.ddx.atoms, [0, 1, 2])
+
+
 @pytest.mark.slow
 def test_optimize_and_frequencies() -> None:
     """optking through psi4.optimize; then finite differences of PCM gradients vs energies.

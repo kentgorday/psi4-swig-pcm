@@ -88,3 +88,29 @@ def test_incore_matches_direct_scf() -> None:
         runs[incore_mb] = (wfn.energy(), as_array(G))
     assert abs(runs[0.0][0] - runs[2000.0][0]) < 1e-10
     np.testing.assert_allclose(runs[0.0][1], runs[2000.0][1], atol=1e-9)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("name", "method", "coords"), [
+    ("water_ghost_water", "hf", [(0, 2), (4, 2)]),  # a real and a ghost atom
+    ("water", "mp2", [(0, 2), (1, 1)]),  # finite differences of energies inside psi4.gradient
+])  # fmt: skip
+def test_gradient_matches_finite_differences_of_pcm_energies(
+    name: str, method: str, coords: list[tuple[int, int]]
+) -> None:
+    # points 5: psi4.gradient("mp2") is then a 5-point finite difference of PCM energies
+    psi4.set_options({**HF_OPTIONS, "basis": "sto-3g", "mp2_type": "conv", "points": 5})
+    xyz = MOLECULES[name].bohr
+    psi4_swig_pcm.enable()
+    g = as_array(psi4.gradient(method, molecule=psi4_molecule(name)))
+
+    def energy_at(atom: int, axis: int, step: float) -> float:
+        mol = psi4_molecule(name, displaced(xyz, atom, axis, step))
+        e: float = psi4.energy(method, molecule=mol)
+        return e
+
+    # The analytic MP2 gradient, PCM left out, was 2e-3 off.
+    tol = 1e-8 if method == "hf" else 1e-7
+    for atom, axis in coords:
+        fd = five_point(partial(energy_at, atom, axis), 2e-3)
+        assert abs(g[atom, axis] - fd) < tol, (atom, axis, g[atom, axis], fd)

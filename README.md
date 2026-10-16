@@ -32,20 +32,29 @@ in a Psi4 input file run by the `psi4` executable.
 | field | default | meaning |
 |---|---|---|
 | `method` | `"IEF-PCM"` | `"C-PCM"`, `"COSMO"`, `"IEF-PCM"` or `"SS(V)PE"` |
-| `eps` | 78.3553 | dielectric constant (water); `float("inf")` for a conductor |
-| `lebedev_order` | 29 | 302 points per sphere |
-| `radii` | modified Bondi × 1.2, H 1.10 Å | cavity radii in bohr, indexed by atomic number |
+| `eps` | 78.3553 | dielectric constant (water), at least 1; `float("inf")` for a conductor |
+| `lebedev_order` | 29 | 302 points per sphere; orders with negative weights are not offered |
+| `radii` | modified Bondi × 1.2, H 1.10 Å | cavity radii in bohr by atomic number (any sequence; stored as a tuple) |
 | `check` | `True` | per-geometry checks: S positive definite, Gauss's law (as PCMSolver does) |
 | `incore_mb` | 2000 | store the (k\|mn) integrals for a geometry if they fit; 0 = always direct |
 
-Supported references: RHF/RKS and UHF/UKS. The UHF gradient is tested against finite
-differences; ROHF and CUHF gradients raise `NotImplementedError`. Psi4 1.11 has no analytic
-gradients for VV10 functionals, so for those it uses finite differences of PCM energies.
-Those are correct, but slow.
+Each SCF writes a short block to Psi4's output: the model, the cavity's atoms and points, how
+the integrals are handled, and the Gauss's-law check.
+
+- **SCF references:** RHF/RKS and UHF/UKS. The UHF gradient is tested against finite
+  differences; ROHF and CUHF gradients raise `NotImplementedError`. Psi4 1.11 has no analytic
+  gradients for VV10 functionals, so for those it uses finite differences of PCM energies.
+  Those are correct, but slow.
+- **Correlated methods (MP2, CC, ...):** the energy sees the PCM only through the SCF
+  reference (no PCM response of the correlation energy). Psi4's analytic correlated gradients
+  would leave the PCM terms out, so their gradients become finite differences of these
+  energies. CFOUR methods (`c4-*`) run their own SCF outside Psi4 and are refused.
+- **Ghost atoms (counterpoise):** they carry basis functions but no cavity sphere, so a
+  monomer in the dimer basis sits in its own cavity.
 
 ## How it plugs into Psi4
 
-`enable()` makes three process-global changes, and `disable()` undoes all three:
+`enable()` makes these process-global changes, and `disable()` undoes them:
 
 1. **The solver goes into Psi4's DDX slot, and the `DDX` option is turned on.**
    `procrouting.solvent.ddx` holds the solver. On every SCF iteration, `scf_iterator` calls
@@ -59,9 +68,11 @@ Those are correct, but slow.
    - lets Psi4's `run_scf_gradient` add their interaction with electrons and nuclei, plus the
      dispersion gradient;
    - adds the motion of the charges with their atoms, and the cavity term.
-3. **The analytic SCF Hessians are removed from `procedures["hessian"]`.** Psi4 then picks
-   finite differences of the PCM gradient for Hessians and frequencies. Those run in the same
-   process, so they see the patches.
+3. **Every other analytic derivative is removed from the table:** the correlated gradients,
+   and all Hessians. Psi4 then picks finite differences: of the PCM gradient for SCF Hessians
+   and frequencies, of energies for the rest. Those run in the same process, so they see the
+   patches.
+4. **CFOUR energies are refused.**
 
 These are Psi4 internals. `tests/test_psi4_interfaces.py` checks each assumption separately,
 so a Psi4 upgrade names what changed.
@@ -73,7 +84,8 @@ interface. It only works with the Psi4 it was built against, so it is a conda pa
 by [pixi-build](https://pixi.sh). That package declares `psi4 >=1.11,<1.12` (Psi4
 run-exports it), and the extension also refuses to import under a different Psi4.
 
-From another pixi workspace (e.g. tautomator's `psi4` environment):
+From another pixi workspace, for example the `psi4` environment of tautomator, the pKa
+workflow this package was written for:
 
 ```toml
 [workspace]
@@ -101,6 +113,16 @@ pixi run -e crosscheck crosscheck   # against PySCF 2.11 (~3 min)
 pixi run check              # ruff, ruff format, mypy --strict
 ```
 
+## Memory
+
+Per geometry the PCM holds three dense npts × npts matrices: S, D and the LU factors of K
+(two for C-PCM and COSMO), and it briefly needs about four to five while building them. A
+38-atom chain at Lebedev order 29 has 4,820 points and peaks at 0.7 GB above the surface.
+The cost grows with npts², at roughly 100–150 points per atom: some 5–6 GB for 100 atoms. The
+(k|mn) integrals add npts · nbf(nbf + 1)/2 doubles when they fit `incore_mb`. None of this
+counts against `psi4.set_memory`, so leave room beside Psi4's own memory, or lower
+`incore_mb` or `lebedev_order`.
+
 ## Known issues handled here
 
 - **Close points.** Switching/Gaussian points can nearly coincide, and a Psi4 `Molecule`
@@ -120,4 +142,8 @@ GPL, so both texts are included: [COPYING.LESSER](COPYING.LESSER) and [COPYING](
 
 `src/psi4_swig_pcm/cavity.py` is derived from PySCF and remains under the Apache License 2.0
 ([LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)). PySCF's attribution notices are in
-[NOTICE](NOTICE).
+[NOTICE](NOTICE), which also credits the Psi4 code `charges.py` adapts.
+
+Built packages also contain pybind11 code, compiled into the extension, under the BSD
+3-Clause License ([LICENSES/pybind11-BSD-3-Clause.txt](LICENSES/pybind11-BSD-3-Clause.txt)).
+That applies to the binary only; this repository's source contains no pybind11 code.

@@ -1,14 +1,16 @@
-# Copyright 2014-2023 The PySCF Developers.
+# Copyright 2014-2023 The PySCF Developers. All Rights Reserved.
 # Copyright (C) 2026 Kent Gorday (modifications).
 # SPDX-License-Identifier: Apache-2.0
 #
-# Derived from PySCF (pyscf/solvent/pcm.py and pyscf/solvent/grad/pcm.py, v2.11).  Unlike the
-# rest of psi4-swig-pcm this file stays under the Apache License, Version 2.0
-# (LICENSES/Apache-2.0.txt); PySCF's attribution notices are in NOTICE.
+# Derived from PySCF v2.11, pyscf/solvent/pcm.py and pyscf/solvent/grad/pcm.py (Author:
+# Xiaojie Wu <wxj6000@gmail.com>); PySCF's gradient module was itself copied from GPU4PySCF
+# with modifications.  Unlike the rest of psi4-swig-pcm this file stays under the Apache
+# License, Version 2.0 (LICENSES/Apache-2.0.txt); PySCF's attribution notices are in NOTICE.
 #
 # Changes from PySCF: numpy/scipy only (Lebedev grids from scipy), radii indexed by true
-# nuclear charge, K and R solved through one LU factorization, the cavity gradient evaluated
-# in row blocks, PCMSolver-style numerical diagnostics, and type annotations.
+# nuclear charge, the system held as S, D and the LU factors of K (no dense K or R), S and D
+# built with a few n x n temporaries, the cavity gradient evaluated in row blocks,
+# PCMSolver-style numerical diagnostics, and type annotations.
 """Switching/Gaussian PCM cavity (Lange & Herbert, JCP 133, 244111 (2010)) and its gradient.
 
 Everything is in bohr.  The surface is a union of scaled vdW spheres with Lebedev points; each
@@ -45,9 +47,8 @@ METHODS: tuple[Method, ...] = get_args(Method)
 BOHR = 0.52917721092  # PySCF's value; radii are converted with it for parity
 
 # Bondi vdW radii (Angstrom) by atomic number, as pyscf.data.radii.VDW; index 0 = ghost.
-# PySCF fills the elements without a Bondi value with 1.999999, not 2.0; kept for parity.
-_UNKNOWN = 1.999999
-_U = _UNKNOWN
+# _U: PySCF's radius for elements without a Bondi value, 1.999999 rather than 2.0 (parity).
+_U = 1.999999
 # fmt: off
 VDW_ANGSTROM = np.array([
     _U, 1.2, 1.4, 1.82, 1.53, 1.92, 1.7, 1.55, 1.52, 1.47, 1.54, 2.27, 1.73, 1.84, 2.1, 1.8, 1.8,
@@ -71,9 +72,12 @@ XI = {
     3890: 4.90777965981, 4334: 4.90782469526, 4802: 4.90749125553, 5294: 4.90762073452,
     5810: 4.90792902522,
 }  # fmt: skip
+# Lebedev orders offered, with their point counts.  Orders 13, 25 and 27 (74, 230 and 266
+# points) are left out: their rules have negative weights, and the 2005 table gives no XI
+# for them.
 LEBEDEV_POINTS = {
-    5: 14, 7: 26, 9: 38, 11: 50, 13: 74, 15: 86, 17: 110, 19: 146, 21: 170, 23: 194, 25: 230,
-    27: 266, 29: 302, 31: 350, 35: 434, 41: 590, 47: 770, 53: 974, 59: 1202,
+    5: 14, 7: 26, 9: 38, 11: 50, 15: 86, 17: 110, 19: 146, 21: 170, 23: 194, 29: 302, 31: 350,
+    35: 434, 41: 590, 47: 770, 53: 974, 59: 1202,
 }  # fmt: skip
 
 
@@ -158,9 +162,8 @@ def make_surface(
 def nuclear_potential(surf: Surface, charges: ArrayLike) -> FloatArray:
     """Potential of point nuclei (charges may be ECP-reduced) at each Gaussian charge."""
     d = cdist(surf.coords, surf.atom_coords)
-    phi: FloatArray = (np.asarray(charges, dtype=float)[None] * erf(surf.xi[:, None] * d) / d).sum(
-        1
-    )
+    per_atom = np.asarray(charges, dtype=float)[None] * erf(surf.xi[:, None] * d) / d
+    phi: FloatArray = per_atom.sum(1)
     return phi
 
 
@@ -177,17 +180,39 @@ def _pair_geometry(
 
 
 def S_D(surf: Surface, with_D: bool) -> tuple[FloatArray, FloatArray | None]:
-    """Dense S (and D) matrices, JCP 133, 244111 (2010)."""
-    idx = np.arange(surf.npts)
-    rij, xi_ij, dr, diag = _pair_geometry(surf, idx, idx)
-    xr = xi_ij * rij
-    rij[diag] = 1.0
-    S: FloatArray = erf(xr) / rij
+    """Dense S (and D) matrices, JCP 133, 244111 (2010).
+
+    Built in place, so the peak is five n x n arrays (S, D and three temporaries) rather
+    than the n x n x 3 separation vectors.
+    """
+    coords = surf.coords - surf.coords.mean(0)  # small coordinates keep r_i.n_j - r_j.n_j exact
+    rij = cdist(coords, coords)
+    np.fill_diagonal(rij, 1.0)
+    inv_xi2 = 1.0 / surf.xi**2
+    xr = np.add.outer(inv_xi2, inv_xi2)  # xi_ij = (1/xi_i^2 + 1/xi_j^2)^(-1/2)
+    np.sqrt(xr, out=xr)
+    np.reciprocal(xr, out=xr)
+    xr *= rij
+    S: FloatArray = erf(xr)
+    S /= rij
     np.fill_diagonal(S, surf.xi * (2.0 / np.pi) ** 0.5 / surf.switch)
     if not with_D:
         return S, None
-    nrij = np.einsum("ijx,jx->ij", dr, surf.normals)
-    D: FloatArray = S * nrij / rij**2 - 2.0 * xr / np.pi**0.5 * np.exp(-(xr**2)) * nrij / rij**3
+    # D_ij = n_j.(r_i - r_j) / r_ij^2 * (S_ij - 2 xr exp(-xr^2) / (sqrt(pi) r_ij))
+    D: FloatArray = np.square(xr)
+    np.negative(D, out=D)
+    np.exp(D, out=D)
+    D *= xr
+    D *= 2.0 / np.pi**0.5
+    D /= rij
+    np.subtract(S, D, out=D)
+    del xr
+    nrij = coords @ surf.normals.T
+    nrij -= np.einsum("jx,jx->j", coords, surf.normals)[None]
+    nrij /= rij
+    nrij /= rij
+    D *= nrij
+    del nrij
     np.fill_diagonal(D, -surf.xi * (2.0 / np.pi) ** 0.5 / (2.0 * surf.R_vdw))
     return S, D
 
@@ -225,35 +250,71 @@ class Diagnostics:
 
 
 class PCMOperator:
-    """K, R and the LU factorization of K for one geometry; charges and energy for a potential."""
+    """The PCM system K q = R phi for one geometry: charges and energy for a potential.
+
+    Held as S, D (IEF-PCM / SS(V)PE) and the LU factors of K: R and K act through S, D and
+    the areas, so neither is stored.  dense_K() and dense_R() build them for inspection.
+    """
 
     def __init__(self, surf: Surface, method: Method = "IEF-PCM", eps: float = 78.3553) -> None:
         if method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}, not {method!r}")
         self.surf, self.method, self.eps = surf, method, eps
-        self.f = f = f_epsilon(method, eps)
+        self.f = f_epsilon(method, eps)
         self.with_D = method in ("IEF-PCM", "SS(V)PE")
         self.S, self.D = S_D(surf, self.with_D)
-        n = surf.npts
-        self.K: FloatArray
-        self.R: FloatArray
+        K = self.dense_K()
+        self.anorm_K = float(np.abs(K).sum(0).max())  # for the condition estimate
+        self.lu = lu_factor(K, overwrite_a=True, check_finite=False)
+
+    def dense_K(self) -> FloatArray:
         if self.D is None:
-            self.K = self.S
-            self.R = -f * np.eye(n)
+            return self.S.copy()
+        K: FloatArray = (self.D * self.surf.area) @ self.S  # D A S
+        if self.method == "IEF-PCM":
+            K *= -self.f / (2 * np.pi)
         else:
-            DA = self.D * surf.area
-            DAS = DA @ self.S
-            if method == "IEF-PCM":
-                self.K = self.S - f / (2 * np.pi) * DAS
-            else:
-                self.K = self.S - f / (4 * np.pi) * (DAS + DAS.T)
-            self.R = -f * (np.eye(n) - DA / (2 * np.pi))
-        self.lu = lu_factor(self.K)
+            K += K.T.copy()
+            K *= -self.f / (4 * np.pi)
+        K += self.S
+        return K
+
+    def dense_R(self) -> FloatArray:
+        n = self.surf.npts
+        if self.D is None:
+            return -self.f * np.eye(n)
+        R: FloatArray = -self.f * (np.eye(n) - self.D * self.surf.area / (2 * np.pi))
+        return R
+
+    def apply_K(self, q: FloatArray) -> FloatArray:
+        Sq: FloatArray = self.S @ q
+        if self.D is None:
+            return Sq
+        A = self.surf.area
+        DASq = self.D @ (A * Sq)
+        if self.method == "IEF-PCM":
+            Kq: FloatArray = Sq - self.f / (2 * np.pi) * DASq
+            return Kq
+        Kq = Sq - self.f / (4 * np.pi) * (DASq + self.S @ (A * (self.D.T @ q)))
+        return Kq
+
+    def apply_R(self, x: FloatArray) -> FloatArray:
+        if self.D is None:
+            return -self.f * x
+        Rx: FloatArray = -self.f * (x - self.D @ (self.surf.area * x) / (2 * np.pi))
+        return Rx
+
+    def apply_RT(self, y: FloatArray) -> FloatArray:
+        if self.D is None:
+            return -self.f * y
+        RTy: FloatArray = -self.f * (y - self.surf.area * (self.D.T @ y) / (2 * np.pi))
+        return RTy
 
     def charges(self, phi: FloatArray) -> tuple[FloatArray, FloatArray]:
         """(q, q_sym) for the total potential phi at the surface points."""
-        q: FloatArray = lu_solve(self.lu, self.R @ phi)
-        q_sym: FloatArray = 0.5 * (q + self.R.T @ lu_solve(self.lu, phi, trans=1))
+        q: FloatArray = lu_solve(self.lu, self.apply_R(phi), check_finite=False)
+        v = lu_solve(self.lu, phi, trans=1, check_finite=False)
+        q_sym: FloatArray = 0.5 * (q + self.apply_RT(v))
         return q, q_sym
 
     def energy(self, phi: FloatArray) -> tuple[float, FloatArray, FloatArray]:
@@ -266,8 +327,7 @@ class PCMOperator:
             s_pd = True
         except LinAlgError:
             s_pd = False
-        anorm = np.abs(self.K).sum(0).max()
-        rcond, _ = dgecon(self.lu[0], anorm, norm="1")
+        rcond, _ = dgecon(self.lu[0], self.anorm_K, norm="1")
         Z = np.asarray(nuclear_charges, dtype=float)
         phi = nuclear_potential(self.surf, Z)
         q, _ = self.charges(phi)
@@ -278,12 +338,12 @@ class PCMOperator:
         else:
             f_exact = (self.eps - 1.0) / self.eps
         expected = -f_exact * Z.sum()
-        rphi = self.R @ phi
+        rphi = self.apply_R(phi)
         return Diagnostics(
             s_positive_definite=s_pd,
             rcond_K=float(rcond),
             gauss_nuclear_relerr=float((q.sum() - expected) / expected),
-            solve_residual=float(np.linalg.norm(self.K @ q - rphi) / np.linalg.norm(rphi)),
+            solve_residual=float(np.linalg.norm(self.apply_K(q) - rphi) / np.linalg.norm(rphi)),
             min_switch=float(self.surf.switch.min()),
             npts=self.surf.npts,
         )

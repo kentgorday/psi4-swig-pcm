@@ -1,5 +1,10 @@
 # Copyright (C) 2026 Kent Gorday
+# Portions adapted from Psi4, Copyright (c) 2007-2026 The Psi4 Developers.
 # SPDX-License-Identifier: LGPL-3.0-only
+#
+# gaussian_basis() follows the diffuse-charge construction in Psi4's
+# driver/procrouting/proc.py (_set_external_potentials_to_wavefunction): the same ghost-He
+# Molecule.from_arrays call, "Diffuse Charges" shell dictionary and normalization.
 """The surface Gaussian charges as Psi4 basis sets, and their contractions with the AO density.
 
 Each surface point carries a unit Gaussian s charge.  Psi4 holds such charges as ghost-He
@@ -78,6 +83,10 @@ class GaussianCharges:
     In-core: B[k, mn] = (k|mn) (packed lower triangle) is computed once per geometry, after
     which each SCF iteration is two matrix-vector products.  Direct: both contractions
     recompute the integrals.  The (k|mn) carry the electron sign (see csrc/gcharge.cpp).
+    Both paths take the density to be symmetric (only m >= n is stored or computed).
+
+    B holds npts * nbf * (nbf + 1) / 2 doubles, on top of Psi4's own memory: it is built
+    only if that fits incore_mb.
     """
 
     def __init__(
@@ -97,13 +106,13 @@ class GaussianCharges:
             nbf = basis.nbf()
             if self.n * nbf * (nbf + 1) / 2 * 8 / 2**20 <= incore_mb:
                 self.B = np.empty((self.n, nbf * (nbf + 1) // 2))
-                for idx, aux in self.sets:
-                    self.B[idx] = _gcharge.gaussian_3c_packed(aux, basis, nthreads)[:-1]
+                for idx, aux in self.sets:  # each set's rows, written in place
+                    _gcharge.gaussian_3c_packed_into(aux, basis, self.B, idx, nthreads)
                 self.tril = np.tril_indices(nbf)
                 self.offdiag = self.tril[0] != self.tril[1]
 
     def esp(self, basis: core.BasisSet, D: core.Matrix) -> FloatArray:
-        """Electronic potential at each Gaussian (negative for electrons)."""
+        """Electronic potential at each Gaussian (negative for electrons); D symmetric."""
         if self.B is not None:
             d = np.asarray(D.np)[self.tril].copy()
             d[self.offdiag] *= 2.0

@@ -12,6 +12,8 @@ The solvation energy of the last SCF is the Psi4 variable "DD SOLVATION ENERGY".
 
 from __future__ import annotations
 
+from importlib.metadata import version as _dist_version
+
 import psi4
 
 from ._build_info import PSI4_VERSION
@@ -33,12 +35,15 @@ from .cavity import METHODS, Method  # noqa: E402
 from .driver import active_settings, disable, enable, enabled, gradient_from_wfn  # noqa: E402
 from .solver import PCMSettings, PCMSolver  # noqa: E402
 
+__version__ = _dist_version("psi4-swig-pcm")
+
 __all__ = [
     "METHODS",
     "PSI4_VERSION",
     "Method",
     "PCMSettings",
     "PCMSolver",
+    "__version__",
     "active_settings",
     "disable",
     "enable",

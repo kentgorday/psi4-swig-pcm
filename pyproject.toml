@@ -8,8 +8,15 @@ version = "0.1.0"
 description = "Switching/Gaussian (Lange-Herbert) PCM with analytic nuclear gradients for Psi4"
 readme = "README.md"
 requires-python = ">=3.13"
-license = "LGPL-3.0-only AND Apache-2.0"
-license-files = ["COPYING", "COPYING.LESSER", "LICENSES/Apache-2.0.txt", "NOTICE"]
+# BSD-3-Clause: pybind11, compiled into the extension (built packages only; see NOTICE)
+license = "LGPL-3.0-only AND Apache-2.0 AND BSD-3-Clause"
+license-files = [
+    "COPYING",
+    "COPYING.LESSER",
+    "LICENSES/Apache-2.0.txt",
+    "LICENSES/pybind11-BSD-3-Clause.txt",
+    "NOTICE",
+]
 authors = [{ name = "Kent Gorday" }]
 # Psi4 itself (1.11.x) comes from conda-forge; it is not on PyPI.  The pixi package
 # in pixi.toml declares it.
@@ -37,6 +44,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers"
 markers = [
     "slow: finite-difference checks, optimizations and frequencies (minutes)",
     "pyscf: compares against PySCF; runs in the crosscheck environment",

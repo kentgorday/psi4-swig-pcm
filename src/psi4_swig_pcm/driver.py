@@ -2,16 +2,22 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Route Psi4's own driver (energy, gradient, optimize, frequency) through the PCM.
 
-enable() makes three process-global changes, all undone by disable():
+enable() makes these process-global changes, all undone by disable():
 
 1. Psi4's DDX solvation slot (procrouting.solvent.ddx) holds PCMSolver and the DDX option is
    on, so every SCF includes the reaction field.
 2. Every SCF entry of psi4.driver.procedures["gradient"] (proc.select_scf_gradient) is wrapped
    to add the PCM terms.  Psi4 1.11 has no DDX gradient: without this, psi4.gradient() returns
    the solvated SCF's gradient without them, and nothing warns.
-3. The analytic SCF Hessians (proc.run_scf_hessian) leave procedures["hessian"], so Psi4
-   negotiates finite differences of the PCM gradient for hessian() and frequency().  Those
-   displacements run in this process (AtomicComputer sets psiapi), so they see 1 and 2.
+3. Every other analytic gradient (MP2, CC, OO methods, ...) and every analytic Hessian leaves
+   the table, so Psi4 negotiates finite differences instead: of PCM gradients for SCF
+   Hessians and frequencies, of energies for the rest.  Those analytic codes would differentiate
+   the SCF part's reaction field away.  The displacements run in this process (AtomicComputer
+   sets psiapi), so they see 1 and 2.
+4. CFOUR energies (c4-*) are refused: CFOUR runs its own SCF, outside Psi4, without the PCM.
+
+Correlated energies (MP2, CC, ...) on top of the PCM SCF see the reaction field only through
+the reference orbitals: the correlation energy itself has no PCM response.
 
 The SCF gradient itself runs Psi4's own run_scf_gradient with the converged symmetrized
 charges frozen on an ExternalPotential (their interaction with electrons and nuclei, plus -D),
@@ -32,6 +38,7 @@ from psi4 import core
 from psi4.driver import p4util, procedures
 from psi4.driver.procrouting import proc, proc_util
 from psi4.driver.procrouting import solvent as p4solvent
+from psi4.driver.procrouting.interface_cfour import run_cfour
 
 from . import cavity as cav
 from .cavity import FloatArray
@@ -46,8 +53,8 @@ class _Patch:
     have_ddx: Any
     ddx: Any
     options: Any  # p4util.OptionsState for DDX
-    gradient: dict[str, Any] = field(default_factory=dict)
-    hessian: dict[str, Any] = field(default_factory=dict)
+    # (table, method) -> the procedures entry it replaced or removed
+    entries: dict[tuple[str, str], Any] = field(default_factory=dict)
 
 
 _active: _Patch | None = None
@@ -58,27 +65,36 @@ def enable(settings: PCMSettings | None = None) -> None:
     global _active
     disable()
     settings = PCMSettings() if settings is None else settings
-    patch = _Patch(
+    # Recorded before anything changes, so that disable() can undo a partial enable().
+    _active = patch = _Patch(
         settings=settings,
         have_ddx=p4solvent._have_ddx,
         ddx=getattr(p4solvent, "ddx", _MISSING),
         options=p4util.OptionsState(["DDX"]),
     )
-    p4solvent._have_ddx = True
-    p4solvent.ddx = types.SimpleNamespace(
-        get_ddx_options=lambda molecule: {},
-        DdxInterface=functools.partial(PCMSolver, settings),
-    )
-    core.set_global_option("DDX", True)
-    wrapper = _wrap_scf_gradient(proc.select_scf_gradient)
-    for name, fn in list(procedures["gradient"].items()):
-        if fn is proc.select_scf_gradient:
-            patch.gradient[name] = fn
-            procedures["gradient"][name] = wrapper
-    for name, fn in list(procedures["hessian"].items()):
-        if fn is proc.run_scf_hessian:
-            patch.hessian[name] = procedures["hessian"].pop(name)
-    _active = patch
+    try:
+        p4solvent._have_ddx = True
+        p4solvent.ddx = types.SimpleNamespace(
+            get_ddx_options=lambda molecule: {},
+            DdxInterface=functools.partial(PCMSolver, settings),
+        )
+        core.set_global_option("DDX", True)
+        wrapper = _wrap_scf_gradient(proc.select_scf_gradient)
+        for name, fn in list(procedures["gradient"].items()):
+            patch.entries["gradient", name] = fn
+            if fn is proc.select_scf_gradient:
+                procedures["gradient"][name] = wrapper
+            else:
+                del procedures["gradient"][name]
+        for name in list(procedures["hessian"]):
+            patch.entries["hessian", name] = procedures["hessian"].pop(name)
+        for name, fn in list(procedures["energy"].items()):
+            if fn is run_cfour:
+                patch.entries["energy", name] = fn
+                procedures["energy"][name] = _refuse_cfour
+    except BaseException:
+        disable()
+        raise
 
 
 def disable() -> None:
@@ -87,12 +103,13 @@ def disable() -> None:
     if _active is None:
         return
     patch, _active = _active, None
-    procedures["gradient"].update(patch.gradient)
-    procedures["hessian"].update(patch.hessian)
+    for (table, name), fn in patch.entries.items():
+        procedures[table][name] = fn
     patch.options.restore()
     p4solvent._have_ddx = patch.have_ddx
     if patch.ddx is _MISSING:
-        del p4solvent.ddx
+        if hasattr(p4solvent, "ddx"):  # absent if enable() failed before setting it
+            del p4solvent.ddx
     else:
         p4solvent.ddx = patch.ddx
 
@@ -110,6 +127,12 @@ def enabled(settings: PCMSettings | None = None) -> Iterator[None]:
 def active_settings() -> PCMSettings | None:
     """The settings of the current enable(), or None."""
     return None if _active is None else _active.settings
+
+
+def _refuse_cfour(name: str, **kwargs: Any) -> None:
+    raise NotImplementedError(
+        f"{name}: CFOUR runs its own SCF without psi4-swig-pcm's PCM; disable() it first"
+    )
 
 
 def _wrap_scf_gradient(original: Callable[..., Any]) -> Callable[..., Any]:
@@ -146,15 +169,21 @@ def gradient_from_wfn(name: str, wfn: core.Wavefunction) -> FloatArray:
         raise ValueError("wfn was not converged with psi4_swig_pcm enabled")
     if not isinstance(wfn, core.RHF | core.UHF):
         raise NotImplementedError(f"PCM gradients for {type(wfn).__name__} references")
+    if wfn.external_pot() is not None:
+        raise NotImplementedError("PCM gradients with another external potential on the wfn")
     ep = sol.charges.external_potential(sol.q_sym)
     wfn.set_external_potential(ep)
-    # SCF gradient with the charges frozen: their interaction with electrons and nuclei (Psi4's
-    # C++), plus Psi4's own -D gradient.  run_scf_gradient sets REFERENCE to RKS/UKS for
-    # scfgrad, but it only knows that a custom (dict) functional is DFT from dft_functional.
-    kwargs = {"dft_functional": True} if wfn.functional().needs_xc() else {}
-    g = np.array(proc.run_scf_gradient(name.lower(), ref_wfn=wfn, **kwargs).gradient().np)
-    g_pts = sol.charges.point_gradients(ep)  # the charges move with their atoms
-    for a, (p0, p1) in enumerate(sol.surf.atom_slices):
-        g[a] += g_pts[p0:p1].sum(0)
-    g += cav.cavity_gradient(sol.op, sol.phi, sol.q)
+    try:
+        # SCF gradient with the charges frozen: their interaction with electrons and nuclei
+        # (Psi4's C++), plus Psi4's own -D gradient.  run_scf_gradient sets REFERENCE to
+        # RKS/UKS for scfgrad, but only knows a custom (dict) functional is DFT from
+        # dft_functional.
+        kwargs = {"dft_functional": True} if wfn.functional().needs_xc() else {}
+        g = np.array(proc.run_scf_gradient(name.lower(), ref_wfn=wfn, **kwargs).gradient().np)
+        g_pts = sol.charges.point_gradients(ep)  # the charges move with their atoms
+    finally:
+        wfn.set_external_potential(None)
+    # Per cavity atom, i.e. per real atom: ghost atoms have no sphere.
+    g_pts_atom = np.array([g_pts[p0:p1].sum(0) for p0, p1 in sol.surf.atom_slices])
+    g[sol.atoms] += g_pts_atom + cav.cavity_gradient(sol.op, sol.phi, sol.q)
     return g

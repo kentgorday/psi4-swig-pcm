@@ -51,7 +51,6 @@ def test_scf_uses_the_ddx_slot() -> None:
     _, wfn = psi4.energy("hf", molecule=psi4_molecule("formate"), return_wfn=True)
     sol = wfn.ddx
     assert isinstance(sol, PCMSolver)
-    assert sol is PCMSolver.last
     assert sol.calls > 2
     # Psi4 records the energy of the next-to-last call, so they agree to SCF convergence.
     assert wfn.variable("DD SOLVATION ENERGY") == pytest.approx(
@@ -77,6 +76,24 @@ def test_hessians_become_finite_differences_of_gradients() -> None:
         assert driver_util.negotiate_derivative_type("hessian", "hf", None, verbose=0) == (2, 1)
         assert driver_util.negotiate_derivative_type("gradient", "hf", None, verbose=0) == (1, 1)
     assert driver_util.negotiate_derivative_type("hessian", "hf", None, verbose=0) == (2, 2)
+
+
+@pytest.mark.parametrize("method", ["mp2", "ccsd", "omp2"])
+def test_correlated_gradients_become_finite_differences_of_energies(method: str) -> None:
+    """Their analytic gradients would differentiate the PCM away (they see only the SCF
+    reference's reaction field as a fixed one-electron term)."""
+    analytic = driver_util.negotiate_derivative_type("gradient", method, None, verbose=0)
+    assert analytic == (1, 1)
+    with psi4_swig_pcm.enabled():
+        assert driver_util.negotiate_derivative_type("gradient", method, None, verbose=0) == (1, 0)
+    assert driver_util.negotiate_derivative_type("gradient", method, None, verbose=0) == analytic
+
+
+def test_cfour_is_refused() -> None:
+    """CFOUR runs its own SCF outside Psi4, which would silently be gas phase."""
+    psi4.set_options(STO3G)
+    with psi4_swig_pcm.enabled(), pytest.raises(NotImplementedError, match="CFOUR"):
+        psi4.energy("c4-hf", molecule=psi4_molecule("formate"))
 
 
 def test_psi4_does_not_compute_ddx_gradient_terms(monkeypatch: pytest.MonkeyPatch) -> None:

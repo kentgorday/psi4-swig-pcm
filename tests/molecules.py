@@ -24,7 +24,7 @@ class Molecule(NamedTuple):
 
     @property
     def Z(self) -> list[int]:
-        return [Z_OF[s] for s in self.symbols]
+        return [Z_OF[s.lstrip("@")] for s in self.symbols]
 
 
 Z_OF = {"H": 1, "C": 6, "N": 7, "O": 8, "I": 53}
@@ -83,6 +83,26 @@ MOLECULES = {
             (-1.157, 0.000, -1.868),
             (-1.867, 0.885, -0.506),
             (-1.867, -0.885, -0.506),
+        ),
+    ),
+    "water": Molecule(
+        0,
+        1,
+        ("O", "H", "H"),
+        ((0.0, 0.0, 0.1173), (0.0, 0.7572, -0.4692), (0.0, -0.7572, -0.4692)),
+    ),
+    # Water with a ghost water (counterpoise monomer in the dimer basis); "@" marks ghosts.
+    "water_ghost_water": Molecule(
+        0,
+        1,
+        ("O", "H", "H", "@O", "@H", "@H"),
+        (
+            (0.0, 0.0, 0.1173),
+            (0.0, 0.7572, -0.4692),
+            (0.0, -0.7572, -0.4692),
+            (2.9, 0.0, 0.25),
+            (3.3, 0.0, -0.62),
+            (1.95, 0.0, 0.1),
         ),
     ),
     "iodomethane": Molecule(  # def2 basis sets put an ECP on iodine

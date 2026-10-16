@@ -7,11 +7,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-def gaussian_3c_packed(aux: Any, basis: Any, nthreads: int) -> NDArray[np.float64]:
-    """B[k, mn] = (k|mn) for m >= n, packed row-major as m*(m+1)/2 + n."""
+def gaussian_3c_packed_into(
+    aux: Any, basis: Any, out: NDArray[np.float64], rows: NDArray[np.intp], nthreads: int
+) -> None:
+    """out[rows[k], mn] = (k|mn) for m >= n, packed row-major as m*(m+1)/2 + n."""
 
 def gaussian_esp(aux: Any, basis: Any, D: Any, nthreads: int) -> Any:
-    """psi4.core.Vector phi[k] = sum_mn D_mn (k|mn)."""
+    """psi4.core.Vector phi[k] = sum_mn D_mn (k|mn), D symmetric."""
 
 def gaussian_potential_matrix(aux: Any, basis: Any, q: Any, nthreads: int) -> Any:
     """psi4.core.Matrix V[m, n] = sum_k q_k (k|mn)."""

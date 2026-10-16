@@ -21,10 +21,21 @@ LGPL-3.0-only; see https://github.com/psi4/psi4.
 Third-party code
 ================
 
+src/psi4_swig_pcm/charges.py adapts the diffuse-charge construction in Psi4's
+driver/procrouting/proc.py (_set_external_potentials_to_wavefunction), Copyright
+(c) 2007-2026 The Psi4 Developers, LGPL-3.0-only like this project.
+
+The compiled extension (psi4_swig_pcm/_gcharge) contains code from the pybind11
+headers, Copyright (c) 2016 Wenzel Jakob, under the BSD 3-Clause License
+(LICENSES/pybind11-BSD-3-Clause.txt).  That applies to built packages only: the
+source in this repository contains no pybind11 code.
+
 src/psi4_swig_pcm/cavity.py is derived from PySCF (pyscf/solvent/pcm.py and
-pyscf/solvent/grad/pcm.py, v2.11, https://github.com/pyscf/pyscf), Copyright
-2014-2023 The PySCF Developers, and remains under the Apache License, Version
-2.0 (LICENSES/Apache-2.0.txt).  The modifications are described in that file's
+pyscf/solvent/grad/pcm.py, v2.11, https://github.com/pyscf/pyscf; Author:
+Xiaojie Wu <wxj6000@gmail.com>; the gradient module was itself copied from
+GPU4PySCF with modifications), Copyright 2014-2023 The PySCF Developers. All
+Rights Reserved.  It remains under the Apache License, Version 2.0
+(LICENSES/Apache-2.0.txt).  The modifications are described in that file's
 header.  PySCF's NOTICE file follows, as Apache-2.0 section 4(d) requires.
 
 -------------------------------------------------------------------------------

@@ -96,8 +96,8 @@ def test_operator_and_cavity_gradient_match_pyscf(name: str, method: Method) -> 
     p = permutation(ws, surf)
     inter = ws._intermediates
     K, R = inter["K"], inter["R"]
-    np.testing.assert_allclose(op.K[np.ix_(p, p)], K, rtol=1e-11, atol=1e-11)
-    np.testing.assert_allclose(op.R[np.ix_(p, p)], R, rtol=1e-11, atol=1e-11)
+    np.testing.assert_allclose(op.dense_K()[np.ix_(p, p)], K, rtol=1e-11, atol=1e-11)
+    np.testing.assert_allclose(op.dense_R()[np.ix_(p, p)], R, rtol=1e-11, atol=1e-11)
 
     # A potential of solute-like size and shape (screened nuclei plus noise), in our order
     rng = np.random.default_rng(0)

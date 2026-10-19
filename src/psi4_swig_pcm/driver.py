@@ -22,6 +22,20 @@ the reference orbitals: the correlation energy itself has no PCM response.
 The SCF gradient itself runs Psi4's own run_scf_gradient with the converged symmetrized
 charges frozen on an ExternalPotential (their interaction with electrons and nuclei, plus -D),
 then adds the motion of the charges with their atoms and the cavity term.
+
+With PCMSettings.nonelectrostatic, the correction G enters in one of two ways:
+
+* self-consistent: the solver adds G and V = dG/dD every SCF iteration, so energies need
+  nothing more; the gradient adds G's explicit derivative at fixed density (Psi4's
+  energy-weighted density already comes from the Fock matrix that holds V).
+* post-SCF (as CMIRS): the SCF is the PCM's alone and G is evaluated on its density.  SCF
+  energies (5., below) get G added.  The gradient needs the density's response,
+  tr(V dD/dR): it is the derivative, at lambda = 0, of the ordinary SCF gradient of an SCF with
+  lambda V0 added to its Fock matrix (V0 = V at the converged density, held fixed).  Four SCFs
+  at +-lambda and +-2 lambda, each from the previous orbitals and converged tightly, give it
+  by Richardson extrapolation to O(lambda^4).
+
+5. With a post-SCF correction, SCF energy entries of procedures["energy"] add G.
 """
 
 from __future__ import annotations
@@ -41,8 +55,16 @@ from psi4.driver.procrouting import solvent as p4solvent
 from psi4.driver.procrouting.interface_cfour import run_cfour
 
 from . import cavity as cav
+from . import solver as _solver
 from .cavity import FloatArray
 from .solver import PCMSettings, PCMSolver
+
+# lambda of the post-SCF gradient's perturbed SCFs (at +-lambda and +-2 lambda).  The
+# central difference at lambda is off by O(lambda^2), ~1e-5 of the response term at 1e-2
+# for formate; the extrapolation removes that, and leaves the SCFs' convergence error over
+# lambda, which PERTURBED_CONVERGENCE keeps below ~1e-8 Eh/bohr.
+FIELD_STRENGTH = 1e-2
+PERTURBED_CONVERGENCE = 1e-10  # E_ and D_CONVERGENCE of the perturbed SCFs, at most
 
 _MISSING = object()
 
@@ -88,10 +110,14 @@ def enable(settings: PCMSettings | None = None) -> None:
                 del procedures["gradient"][name]
         for name in list(procedures["hessian"]):
             patch.entries["hessian", name] = procedures["hessian"].pop(name)
+        energy_wrapper = _wrap_scf_energy(proc.run_scf)
         for name, fn in list(procedures["energy"].items()):
             if fn is run_cfour:
                 patch.entries["energy", name] = fn
                 procedures["energy"][name] = _refuse_cfour
+            elif fn is proc.run_scf:
+                patch.entries["energy", name] = fn
+                procedures["energy"][name] = energy_wrapper
     except BaseException:
         disable()
         raise
@@ -145,21 +171,108 @@ def _wrap_scf_gradient(original: Callable[..., Any]) -> Callable[..., Any]:
     return scf_gradient
 
 
+def _run_scf(name: str, **kwargs: Any) -> core.Wavefunction:
+    """proc.run_scf as run_scf_gradient starts it: REFERENCE set for the SCF, then the SCF."""
+    optstash = proc_util.scf_set_reference_local(name, is_dft="dft_functional" in kwargs)
+    try:
+        return proc.run_scf(name, **kwargs)
+    finally:
+        optstash.restore()
+
+
+def _post_scf(wfn: core.Wavefunction) -> bool:
+    sol = getattr(wfn, "ddx", None)
+    ne = sol.settings.nonelectrostatic if isinstance(sol, PCMSolver) else None
+    return ne is not None and not ne.self_consistent
+
+
+def _total_density(wfn: core.Wavefunction) -> FloatArray:
+    return np.asarray(wfn.Da().np) + np.asarray(wfn.Db().np)
+
+
+def _record_nonelectrostatic(wfn: core.Wavefunction, energy: float, scf_energy: float) -> None:
+    """G as NONELECTROSTATIC ENERGY; CURRENT ENERGY and the wfn's energy as SCF + G."""
+    for key, value in (
+        ("NONELECTROSTATIC ENERGY", energy),
+        ("CURRENT ENERGY", scf_energy + energy),
+    ):
+        wfn.set_variable(key, value)
+        core.set_variable(key, value)
+    wfn.set_energy(scf_energy + energy)
+
+
+def _wrap_scf_energy(original: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(original)
+    def scf_energy(name: str, **kwargs: Any) -> Any:
+        wfn = original(name, **kwargs)
+        sol = getattr(wfn, "ddx", None)
+        if isinstance(sol, PCMSolver) and sol.settings.nonelectrostatic is not None:
+            if _post_scf(wfn):
+                energy = sol.terms.energy(_total_density(wfn)).total
+                _record_nonelectrostatic(wfn, energy, wfn.energy())
+            elif sol.e_nonelectrostatic is not None:  # already in the SCF energy
+                wfn.set_variable("NONELECTROSTATIC ENERGY", sol.e_nonelectrostatic.total)
+                core.set_variable("NONELECTROSTATIC ENERGY", sol.e_nonelectrostatic.total)
+        return wfn
+
+    return scf_energy
+
+
 def _pcm_scf_gradient(name: str, **kwargs: Any) -> core.Wavefunction:
     ref_wfn = kwargs.pop("ref_wfn", None)
-    if ref_wfn is None:  # the start of proc.run_scf_gradient: REFERENCE for the SCF, then the SCF
-        optstash = proc_util.scf_set_reference_local(name, is_dft="dft_functional" in kwargs)
-        try:
-            ref_wfn = proc.run_scf(name, **kwargs)
-        finally:
-            optstash.restore()
-    G = core.Matrix.from_array(gradient_from_wfn(name, ref_wfn))
+    if ref_wfn is None:  # the start of proc.run_scf_gradient
+        ref_wfn = _run_scf(name, **kwargs)
+    g = gradient_from_wfn(name, ref_wfn)
+    if _post_scf(ref_wfn):
+        g = g + post_scf_gradient(name, ref_wfn, **kwargs)
+    G = core.Matrix.from_array(g)
     ref_wfn.set_gradient(G)
     total = "DFT TOTAL GRADIENT" if ref_wfn.functional().needs_xc() else "HF TOTAL GRADIENT"
     for key in ("SCF TOTAL GRADIENT", total, "CURRENT GRADIENT"):
         ref_wfn.set_variable(key, G)
         core.set_variable(key, G)
     return ref_wfn
+
+
+def post_scf_gradient(name: str, ref_wfn: core.Wavefunction, **kwargs: Any) -> FloatArray:
+    """dG/dR (natom, 3) of a post-SCF correction on the converged PCM SCF ref_wfn.
+
+    G's explicit derivative at fixed density, plus tr(V dD/dR) from SCFs with +-lambda V0 and
+    +-2 lambda V0 on their Fock matrices (each from the orbitals the previous SCF left in the
+    scratch file).  Records SCF + G as the energy, and leaves Psi4's variables as ref_wfn's.
+    """
+    sol = ref_wfn.ddx
+    D0 = _total_density(ref_wfn)
+    energies, V0 = sol.terms.energy_and_potential(D0)
+    assert V0 is not None
+    g: FloatArray = sol.terms.gradient(D0)
+    scf_energy = ref_wfn.energy()
+    saved = dict(core.variables())
+    lam = FIELD_STRENGTH
+    perturbed: dict[float, FloatArray] = {}
+    optstash = p4util.OptionsState(
+        ["SCF", "GUESS"], ["SCF", "E_CONVERGENCE"], ["SCF", "D_CONVERGENCE"]
+    )
+    try:
+        core.set_local_option("SCF", "GUESS", "READ")
+        for key in ("E_CONVERGENCE", "D_CONVERGENCE"):
+            current = core.get_option("SCF", key)
+            core.set_local_option("SCF", key, min(current, PERTURBED_CONVERGENCE))
+        for t in (lam, -lam, 2.0 * lam, -2.0 * lam):
+            _solver._perturbation = (t, V0)
+            perturbed[t] = gradient_from_wfn(name, _run_scf(name, **kwargs))
+    finally:
+        _solver._perturbation = None
+        optstash.restore()
+
+    def central(t: float) -> FloatArray:
+        return (perturbed[t] - perturbed[-t]) / (2.0 * t)
+
+    g += (4.0 * central(lam) - central(2.0 * lam)) / 3.0
+    for key, value in saved.items():  # the perturbed SCFs set them too
+        core.set_variable(key, value)
+    _record_nonelectrostatic(ref_wfn, energies.total, scf_energy)
+    return g
 
 
 def gradient_from_wfn(name: str, wfn: core.Wavefunction) -> FloatArray:
@@ -186,4 +299,7 @@ def gradient_from_wfn(name: str, wfn: core.Wavefunction) -> FloatArray:
     # Per cavity atom, i.e. per real atom: ghost atoms have no sphere.
     g_pts_atom = np.array([g_pts[p0:p1].sum(0) for p0, p1 in sol.surf.atom_slices])
     g[sol.atoms] += g_pts_atom + cav.cavity_gradient(sol.op, sol.phi, sol.q)
+    ne = sol.settings.nonelectrostatic
+    if ne is not None and ne.self_consistent:
+        g += sol.terms.gradient(_total_density(wfn))
     return g

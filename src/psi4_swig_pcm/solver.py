@@ -22,8 +22,9 @@ from numpy.typing import ArrayLike
 from psi4 import core
 
 from . import cavity as cav
-from .cavity import IntArray, Method
+from .cavity import FloatArray, IntArray, Method
 from .charges import GaussianCharges
+from .nonelectrostatic import Energies, NonelectrostaticSettings, Terms
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,8 @@ class PCMSettings:
     cavity.modified_bondi_radii(): PySCF's modified Bondi x 1.2, hydrogen 1.10 A.
     incore_mb: memory (MB) the stored (k|mn) integrals may take per geometry, on top of what
     Psi4 is given with set_memory; 0 computes them directly every SCF iteration instead.
+    nonelectrostatic: the nonelectrostatic correction (psi4_swig_pcm.nonelectrostatic), or
+    None for the electrostatic PCM alone.
     """
 
     method: Method = "IEF-PCM"  # SS(V)PE (symmetrized K) is the same continuum model
@@ -53,6 +56,7 @@ class PCMSettings:
     check: bool = True  # per-geometry numerical checks, as PCMSolver does
     incore_mb: float = 2000.0
     radii: tuple[float, ...] = field(default_factory=_default_radii)
+    nonelectrostatic: NonelectrostaticSettings | None = None
 
     def __post_init__(self) -> None:
         if self.method not in cav.METHODS:
@@ -77,6 +81,12 @@ def check_diagnostics(d: cav.Diagnostics, method: Method) -> None:
         )
         log.warning("%s (%s)", message, d)
         core.print_out(f"    Warning: {message}\n")
+
+
+# A fixed Fock-matrix perturbation lambda * V0 (and energy lambda tr(V0 D)) that every SCF
+# solved while it is set includes; driver.py's post-SCF gradient sets it for the two
+# perturbed SCFs that give the density's response to the nonelectrostatic correction.
+_perturbation: tuple[float, FloatArray] | None = None
 
 
 class PCMSolver:
@@ -108,6 +118,9 @@ class PCMSolver:
         )
         self.calls = 0
         self.phi = self.q = self.q_sym = np.zeros(self.surf.npts)
+        self.molecule = molecule
+        self._terms: Terms | None = None
+        self.e_nonelectrostatic: Energies | None = None
         self._print_header(molecule.natom())
         self.diagnostics = self.op.diagnostics(Z) if settings.check else None
         if self.diagnostics is not None:
@@ -149,7 +162,42 @@ class PCMSolver:
             phi = phi + self.phi_nuc
         q, q_sym = self.op.charges(phi)
         V = self.charges.potential_matrix(self.basis, q_sym)
+        energy = float(0.5 * q_sym @ phi)
         self.calls += 1
         if not elec_only:
             self.phi, self.q, self.q_sym = phi, q, q_sym
-        return float(0.5 * q_sym @ phi), V, state
+            ne = self.settings.nonelectrostatic
+            if ne is not None and ne.self_consistent:
+                energies, Vg = self.terms.energy_and_potential(np.asarray(D.np))
+                assert Vg is not None
+                self.e_nonelectrostatic = energies
+                energy += energies.total
+                V.add(core.Matrix.from_array(Vg))
+            if _perturbation is not None:
+                lam, V0 = _perturbation
+                energy += lam * float(np.sum(V0 * np.asarray(D.np)))
+                V.add(core.Matrix.from_array(lam * V0))
+        return energy, V, state
+
+    @property
+    def terms(self) -> Terms:
+        """The nonelectrostatic correction at this geometry (built on first use)."""
+        ne = self.settings.nonelectrostatic
+        if ne is None:
+            raise ValueError("these PCMSettings have no nonelectrostatic correction")
+        if self._terms is None:
+            radii = np.array(
+                [self.settings.radii[self.molecule.true_atomic_number(int(i))] for i in self.atoms]
+            )
+            self._terms = Terms(
+                self.molecule,
+                self.basis,
+                self.surf,
+                self.atoms,
+                radii,
+                ne,
+                core.get_num_threads(),
+                store_field_integrals=ne.self_consistent,
+                store_mb=self.settings.incore_mb,
+            )
+        return self._terms

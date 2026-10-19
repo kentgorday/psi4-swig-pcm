@@ -25,7 +25,14 @@ find_package(psi4 1.11 CONFIG REQUIRED)
 add_psi4_plugin(_gcharge csrc/gcharge.cpp)
 set_target_properties(_gcharge PROPERTIES SUFFIX "${CMAKE_SHARED_MODULE_SUFFIX}")
 
-install(TARGETS _gcharge LIBRARY DESTINATION psi4_swig_pcm)
+# The nonelectrostatic correction's field integrals call libint2's C++ engine directly
+# (Psi4's own PotentialInt stops at first derivatives), so this one does include libint2,
+# and through it Eigen and the Boost.Preprocessor headers.
+add_psi4_plugin(_nonelectrostatic csrc/nonelectrostatic.cpp)
+target_link_libraries(_nonelectrostatic PRIVATE Libint2::int-cxx-headeronly-shared)
+set_target_properties(_nonelectrostatic PROPERTIES SUFFIX "${CMAKE_SHARED_MODULE_SUFFIX}")
+
+install(TARGETS _gcharge _nonelectrostatic LIBRARY DESTINATION psi4_swig_pcm)
 
 # The Psi4 version this binary was compiled against, checked at import.
 configure_file(csrc/_build_info.py.in _build_info.py @ONLY)

@@ -37,6 +37,7 @@ in a Psi4 input file run by the `psi4` executable.
 | `radii` | modified Bondi × 1.2, H 1.10 Å | cavity radii in bohr by atomic number (any sequence; stored as a tuple) |
 | `check` | `True` | per-geometry checks: S positive definite, Gauss's law (as PCMSolver does) |
 | `incore_mb` | 2000 | store the (k\|mn) integrals for a geometry if they fit; 0 = always direct |
+| `nonelectrostatic` | `None` | a `NonelectrostaticSettings`: the nonelectrostatic correction (below) |
 
 Each SCF writes a short block to Psi4's output: the model, the cavity's atoms and points, how
 the integrals are handled, and the Gauss's-law check.
@@ -51,6 +52,34 @@ the integrals are handled, and the Gauss's-law check.
   energies. CFOUR methods (`c4-*`) run their own SCF outside Psi4 and are refused.
 - **Ghost atoms (counterpoise):** they carry basis functions but no cavity sphere, so a
   monomer in the dimer basis sits in its own cavity.
+
+### Nonelectrostatic correction
+
+`PCMSettings(nonelectrostatic=NonelectrostaticSettings(...))` adds the CMIRS-style correction
+of [tautomator](https://github.com/kentgorday/qm-pka) (`docs/nonelectrostatic.md` there):
+dispersion and exchange integrals of the solute density inside and outside the cavity, and a
+surface integral of powers of the solute's normal field. It is the same implementation on
+Psi4's basis functions and libint2; on the same calculation the two agree to 1e-10 Eh.
+
+```python
+from psi4_swig_pcm.nonelectrostatic import NonelectrostaticSettings
+
+ne = NonelectrostaticSettings(dispersion=A, exchange=B, neg_coeff=c_minus, neg_exponent=n_minus,
+                              pos_coeff=c_plus, pos_exponent=n_plus, solvent_rho=0.0494)
+psi4_swig_pcm.enable(psi4_swig_pcm.PCMSettings(eps=78.3553, nonelectrostatic=ne))
+```
+
+- **Post-SCF (default):** the SCF is the PCM's alone, and G is evaluated on its density, as in
+  CMIRS. `psi4.energy` returns SCF + G (`NONELECTROSTATIC ENERGY` holds G). The gradient
+  includes the density's response: four extra SCFs with ±λ·∂G/∂D and ±2λ·∂G/∂D on the Fock
+  matrix, each started from the previous orbitals, give it by Richardson extrapolation
+  (agreement with energy differences ~1e-8 Eh/bohr). An exact Z-vector would need Psi4's
+  JK gradient for an arbitrary density, an XC-kernel derivative and ECP derivative integrals,
+  none of which Psi4 1.11 exports.
+- **Self-consistent (`self_consistent=True`):** G and its potential enter every SCF iteration,
+  so the density relaxes with the correction; the gradient adds G's explicit derivative.
+- SCF references: tested with RHF. UHF/UKS go through the same code (the potential is the
+  same for both spins) but have no test yet.
 
 ## How it plugs into Psi4
 
@@ -73,6 +102,8 @@ the integrals are handled, and the Gauss's-law check.
    and frequencies, of energies for the rest. Those run in the same process, so they see the
    patches.
 4. **CFOUR energies are refused.**
+5. **With a post-SCF nonelectrostatic correction, SCF energy entries of
+   `procedures["energy"]` add G.**
 
 These are Psi4 internals. `tests/test_psi4_interfaces.py` checks each assumption separately,
 so a Psi4 upgrade names what changed.

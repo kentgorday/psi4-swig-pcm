@@ -1,21 +1,21 @@
 [workspace]
 channels = ["conda-forge"]
 name = "psi4-swig-pcm"
-platforms = ["osx-arm64", "linux-64"]
+# The Accelerate BLAS selected below needs macOS 15.5 (as in tautomator).  A platform that
+# carries a virtual package needs a name of its own; [target.osx-arm64] still selects it.
+platforms = [{ name = "osx-arm64-macos-15-5", platform = "osx-arm64", macos = "15.5" }, "linux-64"]
 # Building this package (and depending on it from source, as tautomator does) uses pixi-build,
-# still a preview feature in pixi 0.66.
+# still a preview feature in pixi 0.82.
 preview = ["pixi-build"]
-
-[system-requirements]
-# The Accelerate BLAS selected below needs macOS 15.5 (as in tautomator); linux-64 ignores it.
-macos = "15.5"
+# pixi-build-python 0.8 speaks build API 5 and up, which pixi accepts from 0.71.
+requires-pixi = ">=0.71.0"
 
 # ------------------------------------------------------------------ the conda package
 # Name and version come from pyproject.toml; pixi-build-python runs scikit-build-core,
 # which runs CMakeLists.txt.
 
 [package.build]
-backend = { name = "pixi-build-python", version = "0.5.*" }
+backend = { name = "pixi-build-python", version = ">=0.8" }
 config = { noarch = false, compilers = ["cxx"] }
 
 [package.host-dependencies]

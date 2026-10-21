@@ -14,6 +14,9 @@ models for [Psi4](https://psicode.org) 1.11, with analytic nuclear gradients. Ps
   or geomeTRIC), `psi4.hessian` and `psi4.frequency` all include the PCM once it is enabled.
 - It needs no change to Psi4's source and no PySCF at run time.
 
+The repository also holds a build recipe for [moist](https://github.com/lukaswittmann/moist),
+which tautomator uses under PySCF, without Psi4: see [The moist package](#the-moist-package).
+
 ## Use
 
 ```python
@@ -145,8 +148,41 @@ pixi install                # builds the package and installs it editable
 pixi run test               # fast tests (~10 s)
 pixi run test-slow          # finite differences, optimizations, frequencies (~2 min)
 pixi run -e crosscheck crosscheck   # against PySCF 2.11 (~3 min)
+pixi run -e moist test-moist        # the moist package (compiles moist the first time)
 pixi run check              # ruff, ruff format, mypy --strict
 ```
+
+## The moist package
+
+`packages/moist` builds [moist](https://github.com/lukaswittmann/moist) (MPL-2.0,
+pre-release), which has no conda-forge or PyPI package, as a conda package with pixi-build:
+a rattler-build recipe that pins a moist release and the Fortran libraries its meson wraps
+name. The recipe fetches all of them, so meson itself downloads nothing; moving to a new
+moist release means copying the revisions from its `subprojects/*.wrap` too.
+
+It is the one part of this repository that is not about Psi4. tautomator's `moist`
+environment runs moist under PySCF, with no Psi4 in it, and takes moist from here, so that
+one recipe serves both repositories:
+
+```toml
+moist = { git = "https://github.com/kentgorday/psi4-swig-pcm.git", subdirectory = "packages/moist" }
+```
+
+A change to the recipe has to suit both:
+
+- **No Psi4.** The package must not depend on it.
+- **One Python.** The recipe pins the Python both repositories use (3.13).
+- **BLAS/LAPACK from the environment.** The recipe builds against the netlib variants of
+  `libblas`/`liblapack`, as conda-forge's own builds do, so moist runs on whatever the
+  environment selects: Accelerate on osx-arm64; OpenBLAS here and MKL in tautomator on
+  linux-64. Built against the default OpenBLAS variants, it would link `libopenblas`, then
+  fail to import beside Accelerate or load a system OpenBLAS beside MKL.
+  `tests/test_moist_build.py` checks the extension's links and the libraries it loads.
+- **Patches.** `patches/` adds an `#include <algorithm>` to moist's copy of FINUFFT that
+  conda-forge's clang 23 (macOS) needs.
+
+`pixi run -e moist test-moist` builds and checks it here. tautomator's `pixi.lock` pins the
+commit it builds from; after a change here, `pixi update moist` there moves it.
 
 ## Memory
 

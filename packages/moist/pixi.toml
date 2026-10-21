@@ -1,0 +1,16 @@
+# moist (https://github.com/lukaswittmann/moist, MPL-2.0) as a conda package built from its
+# git source.  moist ships no pixi manifest and no conda-forge or PyPI package, so the recipe
+# lives here: recipe.yaml pins the release and runs moist's own meson build.  The cavity code
+# is Fortran, so the first environment that needs it compiles moist (a few minutes).
+#
+# Not only for this repository: tautomator's moist environment, which runs moist under PySCF
+# and has no Psi4, takes moist from this directory too (a git dependency with
+# subdirectory = "packages/moist").  Keep the package free of Psi4, and its Python the one both
+# repositories use.  See "The moist package" in the README.
+
+[package]
+name = "moist"
+version = "1.1.0a1"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

@@ -32,7 +32,7 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["psi4", "psi4.*", "scipy", "scipy.*", "pyscf", "pyscf.*"]
+module = ["psi4", "psi4.*", "scipy", "scipy.*", "pyscf", "pyscf.*", "moist", "moist.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
@@ -48,4 +48,5 @@ addopts = "--strict-markers"
 markers = [
     "slow: finite-difference checks, optimizations and frequencies (minutes)",
     "pyscf: compares against PySCF; runs in the crosscheck environment",
+    "moist: needs moist (packages/moist); runs in the moist environments",
 ]

@@ -30,6 +30,11 @@ headers, Copyright (c) 2016 Wenzel Jakob, under the BSD 3-Clause License
 (LICENSES/pybind11-BSD-3-Clause.txt).  That applies to built packages only: the
 source in this repository contains no pybind11 code.
 
+packages/moist is a build recipe for moist (https://github.com/lukaswittmann/moist,
+Copyright Lukas Wittmann, MPL-2.0).  It downloads moist's source when the package is
+built and contains none of it, apart from the context lines of a one-line patch to
+moist's copy of FINUFFT (Apache-2.0) in packages/moist/patches.
+
 src/psi4_swig_pcm/cavity.py is derived from PySCF (pyscf/solvent/pcm.py and
 pyscf/solvent/grad/pcm.py, v2.11, https://github.com/pyscf/pyscf; Author:
 Xiaojie Wu <wxj6000@gmail.com>; the gradient module was itself copied from

@@ -22,7 +22,7 @@ from numpy.typing import ArrayLike
 from psi4 import core
 
 from . import cavity as cav
-from .cavity import FloatArray, IntArray, Method
+from .cavity import FloatArray, IntArray, Method, Switching
 from .charges import GaussianCharges
 from .nonelectrostatic import Energies, NonelectrostaticSettings, Terms
 
@@ -44,6 +44,9 @@ class PCMSettings:
     radii: cavity radius in bohr by atomic number (index 0 unused), any sequence; stored as a
     tuple so that the settings stay immutable, comparable and hashable.  The default is
     cavity.modified_bondi_radii(): PySCF's modified Bondi x 1.2, hydrogen 1.10 A.
+    switching: the switching function that fades out points buried in neighbouring spheres,
+    "SWIG" (PySCF's default) or "ISWIG" (cavity module docstring).  ISWIG keeps ~10% more
+    points, whose weights fall off more gently.
     incore_mb: memory (MB) the stored (k|mn) integrals may take per geometry, on top of what
     Psi4 is given with set_memory; 0 computes them directly every SCF iteration instead.
     nonelectrostatic: the nonelectrostatic correction (psi4_swig_pcm.nonelectrostatic), or
@@ -53,6 +56,7 @@ class PCMSettings:
     method: Method = "IEF-PCM"  # SS(V)PE (symmetrized K) is the same continuum model
     eps: float = 78.3553  # water; float("inf") for a conductor
     lebedev_order: int = 29  # 302 points per sphere (PySCF default)
+    switching: Switching = "SWIG"
     check: bool = True  # per-geometry numerical checks, as PCMSolver does
     incore_mb: float = 2000.0
     radii: tuple[float, ...] = field(default_factory=_default_radii)
@@ -63,6 +67,8 @@ class PCMSettings:
             raise ValueError(f"method must be one of {cav.METHODS}, not {self.method!r}")
         if self.lebedev_order not in cav.LEBEDEV_POINTS:
             raise ValueError(f"lebedev_order must be one of {sorted(cav.LEBEDEV_POINTS)}")
+        if self.switching not in cav.SWITCHINGS:
+            raise ValueError(f"switching must be one of {cav.SWITCHINGS}, not {self.switching!r}")
         if not self.eps >= 1.0:  # also rejects NaN
             raise ValueError(f"eps must be >= 1 (inf for a conductor), not {self.eps!r}")
         radii: ArrayLike = self.radii
@@ -110,7 +116,9 @@ class PCMSolver:
         true_Z = [molecule.true_atomic_number(int(i)) for i in self.atoms]
         # Electrons see ECP-reduced nuclear charges; psi4 has already applied them to Z().
         Z = [molecule.Z(int(i)) for i in self.atoms]
-        self.surf = cav.make_surface(xyz, true_Z, np.array(settings.radii), settings.lebedev_order)
+        self.surf = cav.make_surface(
+            xyz, true_Z, np.array(settings.radii), settings.lebedev_order, settings.switching
+        )
         self.op = cav.PCMOperator(self.surf, settings.method, settings.eps)
         self.phi_nuc = cav.nuclear_potential(self.surf, Z)
         self.charges = GaussianCharges(
@@ -144,7 +152,8 @@ class PCMSolver:
             f"\n  ==> psi4-swig-pcm: {s.method}, eps = {s.eps:.4f} <==\n\n"
             f"    Cavity: {len(self.atoms)} atoms"
             + (f" ({ghosts} ghost atoms left out)" if ghosts else "")
-            + f", Lebedev order {s.lebedev_order}, {self.surf.npts} surface points\n"
+            + f", Lebedev order {s.lebedev_order}, {s.switching} switching,"
+            f" {self.surf.npts} surface points\n"
             f"    Surface-charge integrals (k|mn): {integrals}\n"
         )
 

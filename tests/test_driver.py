@@ -126,7 +126,9 @@ def test_psi4_output_reports_the_pcm(tmp_path: Path) -> None:
         psi4.core.be_quiet()
     text = out.read_text()
     assert "==> psi4-swig-pcm: C-PCM, eps = 78.3553 <==" in text
-    assert re.search(r"Cavity: 4 atoms, Lebedev order 29, \d+ surface points", text)
+    assert re.search(
+        r"Cavity: 4 atoms, Lebedev order 29, SWIG switching, \d+ surface points", text
+    )
     assert "Nuclear surface charge vs Gauss's law" in text
 
 

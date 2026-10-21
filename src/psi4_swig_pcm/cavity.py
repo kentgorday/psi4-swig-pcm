@@ -15,7 +15,15 @@
 
 Everything is in bohr.  The surface is a union of scaled vdW spheres with Lebedev points; each
 point carries a unit Gaussian charge of exponent xi**2 and a smooth switching weight F in
-[0, 1].  The models share this surface:
+[0, 1], the product over the other spheres J of f_iJ.  Two switching functions, as in PySCF
+(2.13 and later):
+
+  SWIG    f_iJ = h((r_iJ - R_in,J) / R_sw,J), h the smoothstep switch_h over a band of width
+          R_sw,J = R_J (14 / N_leb)^(1/2) around R_J.
+  ISWIG   f_iJ = 1 - [erf(xi_i (R_J - r_iJ)) + erf(xi_i (R_J + r_iJ))] / 2, the fraction of
+          point i's own Gaussian outside sphere J.
+
+The models share this surface:
 
   C-PCM / COSMO   K = S                                 R = -f I
   IEF-PCM         K = S - f/(2 pi) D A S                R = -f (I - D A / (2 pi))   (asymmetric)
@@ -43,6 +51,8 @@ FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.intp]
 Method = Literal["C-PCM", "COSMO", "IEF-PCM", "SS(V)PE"]
 METHODS: tuple[Method, ...] = get_args(Method)
+Switching = Literal["SWIG", "ISWIG"]
+SWITCHINGS: tuple[Switching, ...] = get_args(Switching)
 
 BOHR = 0.52917721092  # PySCF's value; radii are converted with it for parity
 
@@ -100,6 +110,20 @@ def grad_switch_h(x: FloatArray) -> FloatArray:
     return np.where((x < 0) | (x > 1), 0.0, dy)
 
 
+def iswig_f(xi: FloatArray, R: FloatArray, r: FloatArray) -> FloatArray:
+    """ISWIG's f for a point of exponent parameter xi at distance r from a sphere of radius R."""
+    f: FloatArray = 1.0 - 0.5 * (erf(xi * (R - r)) + erf(xi * (R + r)))
+    return f
+
+
+def iswig_dlogf_dr(xi: FloatArray, R: FloatArray, r: FloatArray) -> FloatArray:
+    """d ln f / dr for iswig_f."""
+    g: FloatArray = (
+        xi / np.pi**0.5 * (np.exp(-((xi * (R - r)) ** 2)) - np.exp(-((xi * (R + r)) ** 2)))
+    )
+    return g / iswig_f(xi, R, r)
+
+
 @dataclass
 class Surface:
     atom_coords: FloatArray  # (natm, 3)
@@ -111,8 +135,10 @@ class Surface:
     R_vdw: FloatArray  # sphere radius of each point's atom
     area: FloatArray  # w R^2 F
     atom_slices: list[tuple[int, int]]  # [(p0, p1)] points of each atom
-    R_in: FloatArray  # per-atom inner switching radius
-    R_sw: FloatArray  # per-atom switching width
+    R_in: FloatArray  # per-atom inner switching radius (SWIG)
+    R_sw: FloatArray  # per-atom switching width (SWIG)
+    R_atom: FloatArray  # per-atom sphere radius
+    switching: Switching = "SWIG"
 
     @property
     def npts(self) -> int:
@@ -126,9 +152,15 @@ class Surface:
 
 
 def make_surface(
-    atom_coords: ArrayLike, Z: Sequence[int], radii: FloatArray, lebedev_order: int = 29
+    atom_coords: ArrayLike,
+    Z: Sequence[int],
+    radii: FloatArray,
+    lebedev_order: int = 29,
+    switching: Switching = "SWIG",
 ) -> Surface:
     """Switching/Gaussian surface.  atom_coords in bohr; Z = true (not ECP-reduced) charges."""
+    if switching not in SWITCHINGS:
+        raise ValueError(f"switching must be one of {SWITCHINGS}, not {switching!r}")
     ng = LEBEDEV_POINTS[lebedev_order]
     x, w = lebedev_rule(lebedev_order)
     unit: FloatArray = x.T  # w sums to 4 pi
@@ -142,21 +174,29 @@ def make_surface(
     p1 = 0
     for ia, r in enumerate(R_J):
         pts = r * unit + xyz[ia]
-        d = (cdist(pts, xyz) - R_in) / R_sw
-        d[:, ia] = 1.0
-        d[d < 1e-8] = 0.0
-        F = np.prod(switch_h(d), axis=1)
+        xi = XI[ng] / (r * w**0.5)
+        if switching == "SWIG":
+            d = (cdist(pts, xyz) - R_in) / R_sw
+            d[:, ia] = 1.0
+            d[d < 1e-8] = 0.0
+            f = switch_h(d)
+        else:
+            f = iswig_f(xi[:, None], R_J[None], cdist(pts, xyz))
+            f[:, ia] = 1.0
+            f[f < 1e-8] = 0.0
+        F = np.prod(f, axis=1)
         keep = w * F > 1e-16
         n = int(keep.sum())
         slices.append((p1, p1 + n))
         p1 += n
-        xi = XI[ng] / (r * w[keep] ** 0.5)
-        parts.append((pts[keep], unit[keep], w[keep], xi, F[keep], np.full(n, r)))
+        parts.append((pts[keep], unit[keep], w[keep], xi[keep], F[keep], np.full(n, r)))
     coords, normals, weights, xi_all, F_all, Rv = (
         np.concatenate(c) for c in zip(*parts, strict=True)
     )
     area = weights * Rv**2 * F_all
-    return Surface(xyz, coords, normals, weights, xi_all, F_all, Rv, area, slices, R_in, R_sw)
+    return Surface(
+        xyz, coords, normals, weights, xi_all, F_all, Rv, area, slices, R_in, R_sw, R_J, switching
+    )
 
 
 def nuclear_potential(surf: Surface, charges: ArrayLike) -> FloatArray:
@@ -360,12 +400,16 @@ def dF_dA(surf: Surface) -> tuple[FloatArray, FloatArray]:
     for ia, (p0, p1) in enumerate(surf.atom_slices):
         rJ = surf.coords[p0:p1, None] - surf.atom_coords[None]
         r = np.linalg.norm(rJ, axis=-1)
-        d = (r - surf.R_in) / surf.R_sw
-        d[:, ia] = 1.0
-        d[d < 1e-8] = 0.0
-        rJ[:, ia] = 0.0
-        rJ[d < 1e-8] = 0.0
-        df = (grad_switch_h(d) / (switch_h(d) * r * surf.R_sw))[..., None] * rJ
+        if surf.switching == "SWIG":
+            d = (r - surf.R_in) / surf.R_sw
+            d[:, ia] = 1.0
+            d[d < 1e-8] = 0.0
+            rJ[d < 1e-8] = 0.0
+            dlogf_dr = grad_switch_h(d) / (switch_h(d) * surf.R_sw)
+        else:
+            dlogf_dr = iswig_dlogf_dr(surf.xi[p0:p1, None], surf.R_atom[None], r)
+        rJ[:, ia] = 0.0  # the own sphere does not switch (its r is R, so f is finite there)
+        df = (dlogf_dr / r)[..., None] * rJ
         F, A = surf.switch[p0:p1, None], surf.area[p0:p1, None]
         g = df.sum(1)
         dF[p0:p1, ia] += F * g  # the point moves with its own atom

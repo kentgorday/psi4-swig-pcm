@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Against PySCF 2.11's pyscf.solvent.pcm, the implementation the cavity derives from.
 
-Runs in the crosscheck environment (pixi run -e crosscheck crosscheck).
+Runs in the crosscheck environment (pixi run -e crosscheck crosscheck).  ISWIG came with PySCF
+2.13, so its cases skip there; they ran against PySCF 2.13.1 when ISWIG was added.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from scipy.spatial import cKDTree
 import psi4_swig_pcm
 from psi4_swig_pcm import PCMSettings
 from psi4_swig_pcm import cavity as cav
-from psi4_swig_pcm.cavity import FloatArray, IntArray, Method
+from psi4_swig_pcm.cavity import SWITCHINGS, FloatArray, IntArray, Method, Switching
 from tests.helpers import EPS, HF_OPTIONS, as_array, psi4_molecule
 from tests.molecules import MOLECULES
 
@@ -37,17 +38,23 @@ def pyscf_mol(name: str, basis: str) -> Any:
     return gto.M(atom=atoms, unit="Bohr", basis=basis, charge=m.charge, verbose=0)
 
 
-def pyscf_pcm(name: str, method: Method) -> tuple[Any, Any]:
+def pyscf_pcm(name: str, method: Method, switching: Switching = "SWIG") -> tuple[Any, Any]:
     mol = pyscf_mol(name, "sto-3g")
     ws = pcm.PCM(mol)
     ws.method, ws.eps, ws.radii_table = method, EPS, cav.modified_bondi_radii()
+    if switching != "SWIG":
+        if not hasattr(ws, "surface_discretization_method"):
+            pytest.skip(f"PySCF {pyscf.__version__} has no {switching}")
+        ws.surface_discretization_method = switching
     ws.build()
     return mol, ws
 
 
-def ours(name: str, method: Method) -> tuple[cav.Surface, cav.PCMOperator]:
+def ours(
+    name: str, method: Method, switching: Switching = "SWIG"
+) -> tuple[cav.Surface, cav.PCMOperator]:
     m = MOLECULES[name]
-    surf = cav.make_surface(m.bohr, m.Z, cav.modified_bondi_radii())
+    surf = cav.make_surface(m.bohr, m.Z, cav.modified_bondi_radii(), 29, switching)
     return surf, cav.PCMOperator(surf, method, EPS)
 
 
@@ -70,10 +77,11 @@ def test_default_radii_are_pyscfs() -> None:
     np.testing.assert_allclose(cav.modified_bondi_radii(), expected, rtol=1e-15, atol=0)
 
 
+@pytest.mark.parametrize("switching", SWITCHINGS)
 @pytest.mark.parametrize("name", ["formate", "acetone", "glycine_zwitterion"])
-def test_surface_matches_pyscf(name: str) -> None:
-    _, ws = pyscf_pcm(name, "C-PCM")
-    surf, _ = ours(name, "C-PCM")
+def test_surface_matches_pyscf(name: str, switching: Switching) -> None:
+    _, ws = pyscf_pcm(name, "C-PCM", switching)
+    surf, _ = ours(name, "C-PCM", switching)
     p = permutation(ws, surf)
     s = ws.surface
     for mine, ref in [
@@ -88,11 +96,14 @@ def test_surface_matches_pyscf(name: str) -> None:
     np.testing.assert_array_equal(surf.atom_of_point[p], atom_ref)
 
 
+@pytest.mark.parametrize("switching", SWITCHINGS)
 @pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("name", ["formate", "acetone"])
-def test_operator_and_cavity_gradient_match_pyscf(name: str, method: Method) -> None:
-    mol, ws = pyscf_pcm(name, method)
-    surf, op = ours(name, method)
+def test_operator_and_cavity_gradient_match_pyscf(
+    name: str, method: Method, switching: Switching
+) -> None:
+    mol, ws = pyscf_pcm(name, method, switching)
+    surf, op = ours(name, method, switching)
     p = permutation(ws, surf)
     inter = ws._intermediates
     K, R = inter["K"], inter["R"]

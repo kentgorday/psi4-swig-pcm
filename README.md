@@ -7,6 +7,9 @@ models for [Psi4](https://psicode.org) 1.11, with analytic nuclear gradients. Ps
 - C-PCM, COSMO, IEF-PCM (the default) and SS(V)PE, with the same surface, radii and
   discretization as PySCF 2.11's `pyscf.solvent.pcm`. Energies and gradients match PySCF to
   1e-9 Eh and 5e-8 Eh/bohr.
+- SWIG's switching function (the default, as in PySCF) or ISWIG's, PySCF 2.13's
+  `surface_discretization_method = "ISWIG"`: the surface, its derivatives and the PCM energy
+  match PySCF 2.13.1 to 3e-15 and 1e-13 Eh.
 - It works through Psi4's own driver. `psi4.energy`, `psi4.gradient`, `psi4.optimize` (optking
   or geomeTRIC), `psi4.hessian` and `psi4.frequency` all include the PCM once it is enabled.
 - It needs no change to Psi4's source and no PySCF at run time.
@@ -34,6 +37,7 @@ in a Psi4 input file run by the `psi4` executable.
 | `method` | `"IEF-PCM"` | `"C-PCM"`, `"COSMO"`, `"IEF-PCM"` or `"SS(V)PE"` |
 | `eps` | 78.3553 | dielectric constant (water), at least 1; `float("inf")` for a conductor |
 | `lebedev_order` | 29 | 302 points per sphere; orders with negative weights are not offered |
+| `switching` | `"SWIG"` | `"SWIG"` or `"ISWIG"`: how points buried in neighbouring spheres fade out. ISWIG's erf switch keeps ~10% more points |
 | `radii` | modified Bondi × 1.2, H 1.10 Å | cavity radii in bohr by atomic number (any sequence; stored as a tuple) |
 | `check` | `True` | per-geometry checks: S positive definite, Gauss's law (as PCMSolver does) |
 | `incore_mb` | 2000 | store the (k\|mn) integrals for a geometry if they fit; 0 = always direct |

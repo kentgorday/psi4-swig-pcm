@@ -11,14 +11,18 @@ import pytest
 
 from psi4_swig_pcm import PCMSettings
 from psi4_swig_pcm import cavity as cav
-from psi4_swig_pcm.cavity import METHODS, FloatArray, Method
+from psi4_swig_pcm.cavity import METHODS, SWITCHINGS, FloatArray, Method, Switching
 from tests.helpers import EPS, displaced, five_point
 from tests.molecules import MOLECULES
 
 
-def surface(name: str, xyz: FloatArray | None = None) -> cav.Surface:
+def surface(
+    name: str, xyz: FloatArray | None = None, switching: Switching = "SWIG"
+) -> cav.Surface:
     mol = MOLECULES[name]
-    return cav.make_surface(mol.bohr if xyz is None else xyz, mol.Z, cav.modified_bondi_radii())
+    return cav.make_surface(
+        mol.bohr if xyz is None else xyz, mol.Z, cav.modified_bondi_radii(), 29, switching
+    )
 
 
 def test_born_ion_exact() -> None:
@@ -32,10 +36,11 @@ def test_born_ion_exact() -> None:
         assert abs(q.sum() + (1 - 1 / EPS)) < 1e-7
 
 
+@pytest.mark.parametrize("switching", SWITCHINGS)
 @pytest.mark.parametrize("name", ["formate", "glycine_zwitterion", "iodomethane"])
-def test_diagnostics(name: str) -> None:
+def test_diagnostics(name: str, switching: Switching) -> None:
     """S is SPD, solves are exact, and C-PCM / IEF-PCM obey Gauss's law (SS(V)PE does not)."""
-    surf = surface(name)
+    surf = surface(name, switching=switching)
     Z = MOLECULES[name].Z
     cases: list[tuple[Method, float | None]] = [
         ("C-PCM", 5e-3),
@@ -72,6 +77,8 @@ def test_invalid_settings_are_rejected() -> None:
     for eps in (0.5, -5.0, float("nan")):
         with pytest.raises(ValueError, match="eps"):
             PCMSettings(eps=eps)
+    with pytest.raises(ValueError, match="switching"):
+        PCMSettings(switching="iswig")  # type: ignore[arg-type]
     assert PCMSettings(eps=1.0).eps == 1.0  # vacuum is allowed
     assert PCMSettings(eps=float("inf")).eps == float("inf")
 
@@ -131,12 +138,13 @@ def test_matrix_free_products_match_dense(method: Method) -> None:
     np.testing.assert_allclose(q_sym, q_sym_ref, rtol=1e-9, atol=1e-12)
 
 
+@pytest.mark.parametrize("switching", SWITCHINGS)
 @pytest.mark.parametrize("method", METHODS)
-def test_cavity_gradient_matches_finite_differences(method: Method) -> None:
+def test_cavity_gradient_matches_finite_differences(method: Method, switching: Switching) -> None:
     """dE/dR at fixed per-point potential: 1/2 phi^T K^-1 R phi as the surface moves."""
     name = "formate"
     xyz = MOLECULES[name].bohr
-    surf = surface(name)
+    surf = surface(name, switching=switching)
     rng = np.random.default_rng(0)
     phi = 0.1 * cav.nuclear_potential(surf, MOLECULES[name].Z) + 0.01 * rng.standard_normal(
         surf.npts
@@ -146,13 +154,15 @@ def test_cavity_gradient_matches_finite_differences(method: Method) -> None:
     g = cav.cavity_gradient(op, phi, q)
 
     def energy_at(atom: int, axis: int, step: float) -> float:
-        s = surface(name, displaced(xyz, atom, axis, step))
+        s = surface(name, displaced(xyz, atom, axis, step), switching)
         assert s.npts == surf.npts  # the same points survive the switching threshold
         return cav.PCMOperator(s, method, EPS).energy(phi)[0]
 
     for atom in range(len(xyz)):
         for axis in range(3):
-            fd = five_point(partial(energy_at, atom, axis), 1e-3)
+            # ISWIG's weights vary faster than SWIG's: at 1e-3 the truncation error reached
+            # 2e-9 (SS(V)PE); it falls as h^4
+            fd = five_point(partial(energy_at, atom, axis), 5e-4)
             assert abs(g[atom, axis] - fd) < 1e-9, (atom, axis, g[atom, axis], fd)
     assert np.abs(g.sum(0)).max() < 1e-10  # translation moves nothing relative to the cavity
 
@@ -169,3 +179,11 @@ def test_blocked_cavity_gradient_is_independent_of_block_size(method: Method) ->
         rtol=1e-12,
         atol=1e-14,
     )
+
+
+def test_iswig_keeps_more_points_with_the_same_area() -> None:
+    """ISWIG's erf switch decays over the Gaussians' width, past SWIG's band: more points
+    survive, while the area (both are smooth approximations of the same union) barely moves."""
+    swig, iswig = (surface("glycine_zwitterion", switching=s) for s in SWITCHINGS)
+    assert iswig.npts > 1.05 * swig.npts
+    assert abs(iswig.area.sum() / swig.area.sum() - 1) < 5e-3

@@ -12,7 +12,7 @@ import pytest
 
 import psi4_swig_pcm
 from psi4_swig_pcm import PCMSettings, PCMSolver
-from psi4_swig_pcm.cavity import Method
+from psi4_swig_pcm.cavity import Method, Switching
 from tests.helpers import EPS, HF_OPTIONS, as_array, displaced, five_point, psi4_molecule
 from tests.molecules import MOLECULES
 
@@ -29,18 +29,21 @@ DFT_OPTIONS = {
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    ("method", "name", "atoms"),
+    ("method", "name", "atoms", "switching"),
     [
-        ("SS(V)PE", "formate", [0, 1, 3]),
-        ("IEF-PCM", "formate", [1, 3]),
-        ("C-PCM", "methylammonium", [1, 2]),
-        ("COSMO", "methylammonium", [2]),
-        ("SS(V)PE", "glycine_zwitterion", [2, 3]),
-        ("IEF-PCM", "iodomethane", [1, 2]),  # def2-SVP ECP on iodine
-        ("IEF-PCM", "formyl", [1, 2]),  # UHF
+        ("SS(V)PE", "formate", [0, 1, 3], "SWIG"),
+        ("IEF-PCM", "formate", [1, 3], "SWIG"),
+        ("C-PCM", "methylammonium", [1, 2], "SWIG"),
+        ("COSMO", "methylammonium", [2], "SWIG"),
+        ("SS(V)PE", "glycine_zwitterion", [2, 3], "SWIG"),
+        ("IEF-PCM", "glycine_zwitterion", [2, 3], "ISWIG"),
+        ("IEF-PCM", "iodomethane", [1, 2], "SWIG"),  # def2-SVP ECP on iodine
+        ("IEF-PCM", "formyl", [1, 2], "SWIG"),  # UHF
     ],
 )
-def test_gradient_matches_finite_differences(method: Method, name: str, atoms: list[int]) -> None:
+def test_gradient_matches_finite_differences(
+    method: Method, name: str, atoms: list[int], switching: Switching
+) -> None:
     """Hartree-Fock, so no DFT grid-weight terms blur the comparison.
 
     With an ECP, Psi4's gas-phase HF gradient itself differs from finite differences by
@@ -66,7 +69,7 @@ def test_gradient_matches_finite_differences(method: Method, name: str, atoms: l
         }
 
     gas = residuals() if name == "iodomethane" else {}
-    psi4_swig_pcm.enable(PCMSettings(method=method, eps=EPS))
+    psi4_swig_pcm.enable(PCMSettings(method=method, eps=EPS, switching=switching))
     for key, resid in residuals().items():
         assert abs(resid - gas.get(key, 0.0)) < 1e-8, (key, resid)
 

@@ -39,6 +39,14 @@ With PCMSettings.nonelectrostatic, the correction G enters in one of two ways:
   by Richardson extrapolation to O(lambda^4).
 
 5. With a post-SCF correction, SCF energy entries of procedures["energy"] add G.
+6. HF.set_external_cpscf_perturbation registers the "DDX" CPSCF callback through a weak
+   reference to the wavefunction.  Psi4 1.11's scf_finalize_energy registers
+   `lambda pert_dm: self.ddx...`, which captures the wavefunction itself; the C++ wavefunction
+   then holds the Python one through its own callback, a cycle that Python's garbage collector
+   cannot see.  Every SCF would keep its wavefunction and its solver (the dense npts x npts
+   matrices) for the life of the process: some 20 MB per formate SCF, gigabytes over a
+   finite-difference Hessian or an optimization.  Neither solver has a CPSCF response yet, so
+   the callback still only raises NotImplementedError, as it did before.
 """
 
 from __future__ import annotations
@@ -46,6 +54,7 @@ from __future__ import annotations
 import functools
 import sys
 import types
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -82,6 +91,7 @@ class _Patch:
     have_ddx: Any
     ddx: Any
     options: Any  # p4util.OptionsState for DDX
+    set_cpscf: Any  # core.HF's own set_external_cpscf_perturbation (6.)
     # (table, method) -> the procedures entry it replaced or removed
     entries: dict[tuple[str, str], Any] = field(default_factory=dict)
 
@@ -105,8 +115,12 @@ def enable(settings: PCMSettings | MoistSettings | None = None) -> None:
         have_ddx=p4solvent._have_ddx,
         ddx=getattr(p4solvent, "ddx", _MISSING),
         options=p4util.OptionsState(["DDX"]),
+        set_cpscf=core.HF.__dict__["set_external_cpscf_perturbation"],
     )
     try:
+        core.HF.set_external_cpscf_perturbation = _weak_ddx_cpscf(
+            core.HF.set_external_cpscf_perturbation
+        )
         p4solvent._have_ddx = True
         p4solvent.ddx = types.SimpleNamespace(
             get_ddx_options=lambda molecule: {},
@@ -144,6 +158,7 @@ def disable() -> None:
     for (table, name), fn in patch.entries.items():
         procedures[table][name] = fn
     patch.options.restore()
+    core.HF.set_external_cpscf_perturbation = patch.set_cpscf
     p4solvent._have_ddx = patch.have_ddx
     if patch.ddx is _MISSING:
         if hasattr(p4solvent, "ddx"):  # absent if enable() failed before setting it
@@ -188,6 +203,36 @@ def _is_moist_solver(sol: Any) -> TypeGuard[MoistSolver]:
 def active_settings() -> PCMSettings | MoistSettings | None:
     """The settings of the current enable(), or None."""
     return None if _active is None else _active.settings
+
+
+def _weak_ddx_cpscf(setter: Callable[..., None]) -> Callable[..., None]:
+    """HF.set_external_cpscf_perturbation, with the "DDX" callback holding its wavefunction
+    only weakly (6. above).  Psi4's own callback is
+    lambda pert_dm: self.ddx.get_solvation_contributions(pert_dm, ...)[1]."""
+
+    def set_external_cpscf_perturbation(
+        self: core.HF, name: str, function: Callable[[core.Matrix], core.Matrix]
+    ) -> None:
+        if name == "DDX":
+            function = _ddx_cpscf_response(weakref.ref(self))
+        setter(self, name, function)
+
+    return set_external_cpscf_perturbation
+
+
+def _ddx_cpscf_response(
+    wfn_ref: weakref.ref[core.HF],
+) -> Callable[[core.Matrix], core.Matrix]:
+    def response(pert_dm: core.Matrix) -> core.Matrix:
+        wfn = wfn_ref()
+        if wfn is None:
+            raise ReferenceError("the wavefunction of this DDX CPSCF callback no longer exists")
+        V: core.Matrix = wfn.ddx.get_solvation_contributions(
+            pert_dm, elec_only=True, nonequilibrium=True
+        )[1]
+        return V
+
+    return response
 
 
 def _refuse_cfour(name: str, **kwargs: Any) -> None:

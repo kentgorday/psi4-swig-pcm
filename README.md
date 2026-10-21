@@ -274,6 +274,12 @@ iteration) are not screened, so their cost grows with points × shells².
 - **Boost at configure time.** `libint2-config.cmake` (loaded by `psi4Config.cmake`) asks for
   Boost, but no Boost header reaches the extension. `CMakeLists.txt` declares the header-only
   target instead of adding `libboost` as a run dependency.
+- **Wavefunctions that were never freed.** With DDX on, Psi4 1.11 registers a CPSCF callback
+  on each SCF's wavefunction that captures the wavefunction itself, a cycle through C++ that
+  Python's garbage collector cannot see. Every SCF then kept its wavefunction and solver (the
+  dense matrices of [Memory](#memory)) for the life of the process: gigabytes over a
+  finite-difference Hessian or an optimization. While enabled, the callback holds the
+  wavefunction weakly.
 
 ## License
 

@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import gc
 import re
 import subprocess
 import sys
+import weakref
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import psi4
@@ -27,11 +31,13 @@ STO3G = {"basis": "sto-3g", "scf_type": "pk", "e_convergence": 1e-10, "d_converg
 def test_enable_and_disable_restore_psi4() -> None:
     gradient, hessian = dict(procedures["gradient"]), dict(procedures["hessian"])
     have_ddx, had_ddx = p4solvent._have_ddx, hasattr(p4solvent, "ddx")
+    set_cpscf = core.HF.__dict__["set_external_cpscf_perturbation"]
     settings = PCMSettings(method="C-PCM")
 
     psi4_swig_pcm.enable(settings)
     assert psi4_swig_pcm.active_settings() is settings
     assert core.get_option("SCF", "DDX")
+    assert core.HF.__dict__["set_external_cpscf_perturbation"] is not set_cpscf
     assert procedures["gradient"]["hf"] is not gradient["hf"]
     assert "hf" not in procedures["hessian"]
     psi4_swig_pcm.enable()  # re-enabling replaces, it does not stack
@@ -44,6 +50,7 @@ def test_enable_and_disable_restore_psi4() -> None:
     assert procedures["hessian"] == hessian
     assert p4solvent._have_ddx == have_ddx
     assert hasattr(p4solvent, "ddx") == had_ddx
+    assert core.HF.__dict__["set_external_cpscf_perturbation"] is set_cpscf
     psi4_swig_pcm.disable()  # a no-op
 
 
@@ -53,6 +60,30 @@ def test_enabled_context_manager() -> None:
         assert isinstance(settings, PCMSettings)
         assert settings.eps == 4.0
     assert psi4_swig_pcm.active_settings() is None
+
+
+@pytest.mark.parametrize("run", [psi4.energy, psi4.gradient], ids=["energy", "gradient"])
+def test_finished_scf_frees_its_wavefunction_and_solver(run: Callable[..., Any]) -> None:
+    """Psi4's DDX CPSCF callback no longer keeps every SCF's wavefunction, and with it the
+    solver's npts x npts matrices, alive for the rest of the process (driver.py, 6.)."""
+    psi4.set_options(STO3G)
+    psi4_swig_pcm.enable()
+    _, wfn = run("hf", molecule=psi4_molecule("formate"), return_wfn=True)
+    assert isinstance(wfn.ddx, PCMSolver)
+    refs = weakref.ref(wfn), weakref.ref(wfn.ddx)
+    del wfn
+    gc.collect()
+    assert [ref() for ref in refs] == [None, None]
+
+
+def test_cpscf_still_reaches_the_solver() -> None:
+    """The weakly held DDX callback still hands Psi4's CPSCF to the solver, which refuses it."""
+    psi4.set_options(STO3G)
+    psi4_swig_pcm.enable()
+    with pytest.raises(NotImplementedError, match="nonequilibrium"):
+        psi4.properties(
+            "hf", properties=["dipole_polarizabilities"], molecule=psi4_molecule("formate")
+        )
 
 
 def test_psi4_gradient_is_the_pcm_gradient() -> None:

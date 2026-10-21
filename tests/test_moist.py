@@ -8,6 +8,8 @@ comparisons in moist-crosscheck (pixi run -e moist-crosscheck crosscheck-moist).
 
 from __future__ import annotations
 
+import gc
+import weakref
 from collections.abc import Callable
 from functools import partial
 from types import SimpleNamespace
@@ -124,6 +126,18 @@ def test_energy_runs_through_the_ddx_slot(cavity: str) -> None:
     psi4_swig_pcm.disable()
     E_gas = psi4.energy("hf", molecule=psi4_molecule("formate"))
     assert E_gas > E
+
+
+def test_finished_scf_frees_its_wavefunction_and_solver() -> None:
+    """Nothing keeps a finished SCF's wavefunction and MoistSolver alive (driver.py, 6.)."""
+    psi4.set_options(HF_OPTIONS)
+    psi4_swig_pcm.enable(settings("svdw"))
+    _, wfn = psi4.gradient("hf", molecule=psi4_molecule("water"), return_wfn=True)
+    assert isinstance(wfn.ddx, MoistSolver)
+    refs = weakref.ref(wfn), weakref.ref(wfn.ddx)
+    del wfn
+    gc.collect()
+    assert [ref() for ref in refs] == [None, None]
 
 
 @pytest.mark.parametrize("cavity", ["svdw", "isodensity"])

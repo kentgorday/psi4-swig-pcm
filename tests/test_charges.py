@@ -10,14 +10,16 @@ from psi4 import core
 from scipy.spatial.distance import pdist
 
 from psi4_swig_pcm import cavity as cav
+from psi4_swig_pcm.cavity import FloatArray
 from psi4_swig_pcm.charges import (
     ANCHOR_OFFSET,
     CLOSE_POINT_TOL,
     GaussianCharges,
+    GaussianPoints,
     gaussian_basis,
     split_close_points,
 )
-from tests.helpers import psi4_molecule
+from tests.helpers import displaced, psi4_molecule
 from tests.molecules import MOLECULES
 
 
@@ -98,3 +100,47 @@ def test_incore_matches_direct() -> None:
         np.array(direct.potential_matrix(bs, q).np),
         atol=1e-14,
     )
+
+
+def test_derivative_kernels_match_finite_differences() -> None:
+    """esp_deriv1 (point and basis-centre derivatives) and esp_dxi, as the moist host uses them."""
+    name = "water"
+    xyz = MOLECULES[name].bohr
+    bs = core.BasisSet.build(psi4_molecule(name), "ORBITAL", "def2-svp")
+    rng = np.random.default_rng(3)
+    pts = GaussianPoints(rng.normal(size=(6, 3)) * 2.5, rng.uniform(2.0, 6.0, 6))
+    D = rng.standard_normal((bs.nbf(), bs.nbf()))
+    Dm = core.Matrix.from_array(D + D.T)
+    w = rng.standard_normal(pts.npts)
+    charges = GaussianCharges(pts, nthreads=4)
+    field, grad = charges.esp_deriv1(bs, Dm, w)
+    dxi = charges.esp_dxi(bs, Dm)
+    h = 1e-4
+
+    def esp(p: GaussianPoints, basis: core.BasisSet = bs) -> FloatArray:
+        return GaussianCharges(p, nthreads=1).esp(basis, Dm)
+
+    for k in range(pts.npts):
+        for x in range(3):
+            step = np.zeros_like(pts.coords)
+            step[k, x] = h
+            fd = esp(GaussianPoints(pts.coords + step, pts.xi)) - esp(
+                GaussianPoints(pts.coords - step, pts.xi)
+            )
+            assert abs(field[k, x] - fd[k] / (2 * h)) < 1e-7
+        dx = np.zeros(pts.npts)
+        dx[k] = h
+        fd = esp(GaussianPoints(pts.coords, pts.xi + dx)) - esp(
+            GaussianPoints(pts.coords, pts.xi - dx)
+        )
+        assert abs(dxi[k] - fd[k] / (2 * h)) < 1e-9
+    for a in range(len(xyz)):
+        for x in range(3):
+            fd_pm = [
+                w @ esp(pts, core.BasisSet.build(psi4_molecule(name, displaced(xyz, a, x, s)),
+                                                 "ORBITAL", "def2-svp"))
+                for s in (h, -h)
+            ]  # fmt: skip
+            assert abs(grad[a, x] - (fd_pm[0] - fd_pm[1]) / (2 * h)) < 1e-7
+    # translational invariance: moving points and basis centres together changes nothing
+    np.testing.assert_allclose(grad.sum(0), -(w[:, None] * field).sum(0), atol=1e-12)

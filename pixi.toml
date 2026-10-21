@@ -83,7 +83,8 @@ crosscheck = { cmd = "pytest -m pyscf", env = { OMP_NUM_THREADS = "4" } }
 # ------------------------------------------------------------------ moist (packages/moist)
 # moist (https://github.com/lukaswittmann/moist), built from source by pixi-build from the
 # recipe in packages/moist.  tautomator's PySCF environment takes moist from that recipe too;
-# this environment builds it and checks the build (tests/test_moist_build.py).  The first
+# this environment builds it and checks the build (tests/test_moist_build.py), and runs the
+# moist host prototype (moist_host.py, tests/test_moist.py).  The first
 # `pixi install -e moist` compiles moist.
 
 [feature.moist.dependencies]
@@ -91,7 +92,13 @@ moist = { path = "packages/moist" }
 
 [feature.moist.tasks]
 test-moist = { cmd = "pytest -m 'moist and not slow and not pyscf'", env = { OMP_NUM_THREADS = "4" } }
+test-moist-slow = { cmd = "pytest -m 'moist and slow and not pyscf'", env = { OMP_NUM_THREADS = "4" } }
+
+[feature.moist-crosscheck.tasks]
+crosscheck-moist = { cmd = "pytest -m 'moist and pyscf'", env = { OMP_NUM_THREADS = "4" } }
 
 [environments]
 crosscheck = ["crosscheck"]
 moist = ["moist"]
+# moist's own PySCF host as the reference for this Psi4 host
+moist-crosscheck = ["moist", "crosscheck", "moist-crosscheck"]

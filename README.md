@@ -15,7 +15,9 @@ models for [Psi4](https://psicode.org) 1.11, with analytic nuclear gradients. Ps
 - It needs no change to Psi4's source and no PySCF at run time.
 
 The repository also holds a build recipe for [moist](https://github.com/lukaswittmann/moist),
-which tautomator uses under PySCF, without Psi4: see [The moist package](#the-moist-package).
+which tautomator uses under PySCF, without Psi4 (see [The moist package](#the-moist-package)),
+and a prototype that runs moist's cavities in Psi4 (see
+[moist cavities](#moist-cavities-prototype)).
 
 ## Use
 
@@ -115,6 +117,63 @@ psi4_swig_pcm.enable(psi4_swig_pcm.PCMSettings(eps=78.3553, nonelectrostatic=ne)
 These are Psi4 internals. `tests/test_psi4_interfaces.py` checks each assumption separately,
 so a Psi4 upgrade names what changed.
 
+## moist cavities (prototype)
+
+[moist](https://github.com/lukaswittmann/moist) (MPL-2.0, pre-release) builds smooth,
+differentiable cavities (SvdW-DROP, CFC-DROP, the isodensity ρ-DROP, iSwiG) and solves the
+PCM on them. `moist_host.py` makes Psi4 a moist host, as moist's own `moist.pyscf` does for
+PySCF, through the same plumbing as above: the DDX slot for the SCF and the wrapped SCF
+gradient.
+
+```python
+import moist
+import psi4
+import psi4_swig_pcm
+from psi4_swig_pcm.moist_host import MoistSettings
+
+psi4_swig_pcm.enable(MoistSettings(
+    cavity=moist.DROP(lsf=moist.SvdW(), parameters=moist.DROPParameters(nleb=194)),
+    # isodensity: lsf=moist.Isodensity(parameters=moist.IsodensityParameters(rho_iso=1e-3))
+    components=(moist.ModelComponentCPCM(78.3553),),  # COSMO, IEF-PCM, SS(V)PE, LPB too
+))
+psi4.optimize("pbe0")
+```
+
+moist owns the cavity and the model. It asks Psi4 for quantities on its cavity grid, and Psi4
+contracts what moist returns with its own integrals:
+
+| moist asks for / returns | Psi4 supplies |
+|---|---|
+| `phi`, the potential at the Gaussian probes | `(k\|mn)` contracted with D, as for SWIG, plus the nuclei |
+| `dphi_dr`, `dphi_dxi` (gradient; every iteration on ρ-DROP) | first derivatives of `(k\|mn)`; three-centre overlaps |
+| `w_phi` (Fock, gradient) | `Σ w (k\|mn)`; basis-centre derivatives of `(k\|mn)`, in the same pass as the gradient's `dphi_dr` |
+| ρ-DROP: the density matrix | D on moist's Cartesian monomials |
+| ρ-DROP: density weights (Fock, gradient) | basis functions and derivatives, to 3rd order, on the grid |
+
+The gradient is Psi4's own SCF gradient at the solvated density plus moist's part. It needs no
+external potential. The `(k|mn)` are stored for a grid when they fit `incore_mb` (as for
+SWIG). ρ-DROP has a new grid every SCF iteration, but stored integrals still serve both its
+potential and its Fock matrix.
+
+- **Checked:** total energies match moist's PySCF host to 3e-12 Eh and gradients to 7e-9
+  Eh/bohr (RHF and UHF, SvdW-DROP and ρ-DROP). Gradients match finite differences of energies
+  to 1e-8 Eh/bohr on SvdW-, CFC- and ρ-DROP and on iSwiG; for C-PCM, IEF-PCM and LPB; with
+  ghost atoms (SvdW-DROP), and with iodine's ECP.
+- **Not yet:** the models that use the normal derivative of the potential (DPCM in both
+  forms, SLIC, nonlocal) need its second derivatives and raise `NotImplementedError`. Also
+  missing: GOSTSHYP's Gaussian moments, ghost atoms on ρ-DROP, and the CPSCF response.
+- **Cost:** on glycine zwitterion (PBE0/def2-TZVP, 4 threads) an energy and gradient costs
+  1.2× the gas-phase job on SvdW-DROP and 5.2× on ρ-DROP. ρ-DROP's grid moves every
+  SCF iteration, so every iteration also needs the derivatives of the potential at the moved
+  points and with respect to their Gaussian widths, which a fixed cavity needs only in the
+  gradient. `DROPParameters(wleb_prune_level=4)` leaves out points with near-zero weights:
+  there, 14% fewer points and the energy within 1e-9 Eh.
+- **Build:** moist comes from `packages/moist` (see [The moist package](#the-moist-package)).
+  The first `pixi install -e moist` compiles it.
+
+The code that follows moist's own PySCF host is in `moist_contractions.py`, under moist's
+license (see [License](#license)).
+
 ## Install
 
 The package builds a C++ extension against Psi4's headers, through Psi4's CMake plugin
@@ -148,7 +207,9 @@ pixi install                # builds the package and installs it editable
 pixi run test               # fast tests (~10 s)
 pixi run test-slow          # finite differences, optimizations, frequencies (~2 min)
 pixi run -e crosscheck crosscheck   # against PySCF 2.11 (~3 min)
-pixi run -e moist test-moist        # the moist package (compiles moist the first time)
+pixi run -e moist test-moist        # the moist package and host (compiles moist the first time)
+pixi run -e moist test-moist-slow   # moist host: finite differences, an optimization (~2 min)
+pixi run -e moist-crosscheck crosscheck-moist   # moist host against moist's PySCF host
 pixi run check              # ruff, ruff format, mypy --strict
 ```
 
@@ -160,9 +221,9 @@ a rattler-build recipe that pins a moist release and the Fortran libraries its m
 name. The recipe fetches all of them, so meson itself downloads nothing; moving to a new
 moist release means copying the revisions from its `subprojects/*.wrap` too.
 
-It is the one part of this repository that is not about Psi4. tautomator's `moist`
-environment runs moist under PySCF, with no Psi4 in it, and takes moist from here, so that
-one recipe serves both repositories:
+The package itself has nothing to do with Psi4. The moist prototype here runs it in Psi4,
+and tautomator's `moist` environment runs it under PySCF, with no Psi4 in it. tautomator
+takes moist from here, so that one recipe serves both repositories:
 
 ```toml
 moist = { git = "https://github.com/kentgorday/psi4-swig-pcm.git", subdirectory = "packages/moist" }
@@ -198,6 +259,11 @@ The cost grows with npts², at roughly 100–150 points per atom: some 5–6 GB 
 counts against `psi4.set_memory`, so leave room beside Psi4's own memory, or lower
 `incore_mb` or `lebedev_order`.
 
+The moist prototype stores `(k|mn)` the same way, also outside `psi4.set_memory`. On ρ-DROP it
+also evaluates the basis functions and their derivatives on the grid, in blocks of about
+64 MB. Its three-centre overlaps (the derivative in the Gaussian widths, every ρ-DROP
+iteration) are not screened, so their cost grows with points × shells².
+
 ## Known issues handled here
 
 - **Close points.** Switching/Gaussian points can nearly coincide, and a Psi4 `Molecule`
@@ -218,6 +284,11 @@ GPL, so both texts are included: [COPYING.LESSER](COPYING.LESSER) and [COPYING](
 `src/psi4_swig_pcm/cavity.py` is derived from PySCF and remains under the Apache License 2.0
 ([LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)). PySCF's attribution notices are in
 [NOTICE](NOTICE), which also credits the Psi4 code `charges.py` adapts.
+
+`src/psi4_swig_pcm/moist_contractions.py` is adapted from moist's PySCF host and remains under
+the Mozilla Public License 2.0 ([LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt)), moist's
+license. The MPL applies file by file: the rest of the moist host is LGPL like the rest of
+this repository.
 
 Built packages also contain pybind11 code, compiled into the extension, under the BSD
 3-Clause License ([LICENSES/pybind11-BSD-3-Clause.txt](LICENSES/pybind11-BSD-3-Clause.txt)).

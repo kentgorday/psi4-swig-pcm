@@ -17,3 +17,12 @@ def gaussian_esp(aux: Any, basis: Any, D: Any, nthreads: int) -> Any:
 
 def gaussian_potential_matrix(aux: Any, basis: Any, q: Any, nthreads: int) -> Any:
     """psi4.core.Matrix V[m, n] = sum_k q_k (k|mn)."""
+
+def gaussian_esp_deriv1(
+    aux: Any, basis: Any, D: Any, w: Any | None, natom: int, nthreads: int
+) -> tuple[Any, Any]:
+    """(field, grad): field[k, x] = sum_mn D_mn d(k|mn)/dr_k,x (naux, 3) and
+    grad[A, x] = sum_k w_k sum_mn D_mn d(k|mn)/dR_A,x over basis centres (natom, 3)."""
+
+def gaussian_overlap_esp(aux: Any, basis: Any, D: Any, nthreads: int) -> Any:
+    """psi4.core.Vector s[k] = sum_mn D_mn (k m n), three-centre overlap, D symmetric."""

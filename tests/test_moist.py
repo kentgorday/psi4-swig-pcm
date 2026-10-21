@@ -1,0 +1,257 @@
+# Copyright (C) 2026 Kent Gorday
+# SPDX-License-Identifier: LGPL-3.0-only
+"""moist cavities and models through moist_host (prototype): Psi4 as moist's host.
+
+Runs in the moist environment (pixi run -e moist test-moist, test-moist-slow); the PySCF
+comparisons in moist-crosscheck (pixi run -e moist-crosscheck crosscheck-moist).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from functools import partial
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+import psi4
+import pytest
+from psi4 import core
+
+import psi4_swig_pcm
+from psi4_swig_pcm.charges import GaussianCharges
+from tests.helpers import HF_OPTIONS, as_array, displaced, five_point, psi4_molecule
+from tests.molecules import MOLECULES
+
+moist = pytest.importorskip("moist")
+from psi4_swig_pcm import moist_host  # noqa: E402
+from psi4_swig_pcm.moist_host import CartesianAOs, MoistSettings, MoistSolver  # noqa: E402
+
+pytestmark = pytest.mark.moist
+
+EPS = 78.3553
+NLEB = 194
+
+CAVITIES: dict[str, Callable[[], Any]] = {
+    "svdw": lambda: moist.DROP(lsf=moist.SvdW(), parameters=moist.DROPParameters(nleb=NLEB)),
+    "isodensity": lambda: moist.DROP(
+        lsf=moist.Isodensity(), parameters=moist.DROPParameters(nleb=NLEB)
+    ),
+    "cfc": lambda: moist.DROP(lsf=moist.CFC(), parameters=moist.DROPParameters(nleb=NLEB)),
+    "iswig": lambda: moist.ISwiG(),
+}
+
+
+COMPONENTS: dict[str, Callable[[], Any]] = {
+    "cpcm": lambda: moist.ModelComponentCPCM(EPS),
+    "iefpcm": lambda: moist.ModelComponentIEFPCM(EPS),
+    "lpb": lambda: moist.ModelComponentLPB(EPS, 0.1),
+    "dpcm": lambda: moist.ModelComponentDPCM(EPS),
+}
+
+
+def settings(cavity: str, component: str = "cpcm") -> MoistSettings:
+    return MoistSettings(cavity=CAVITIES[cavity](), components=(COMPONENTS[component](),))
+
+
+def test_cartesian_aos_reproduce_psi4_basis_functions() -> None:
+    """The monomials times T are Psi4's (pure, up to f) functions; derivatives to 3rd order."""
+    bs = core.BasisSet.build(psi4_molecule("water"), "ORBITAL", "def2-tzvp")
+    aos = CartesianAOs(bs, {0: 0, 1: 1, 2: 2})
+    live = settings("isodensity").cavity.build(
+        basis=aos.gaussian_basis, context=moist.Context(verbosity=0)
+    )
+    aos.bind_layout(*live.isodensity_layout())
+    rng = np.random.default_rng(4)
+    pts = rng.normal(size=(30, 3)) * 1.5
+    vals = aos.values(pts, 3)
+    ref = np.array([np.asarray(bs.compute_phi(*p)) for p in pts])
+    np.testing.assert_allclose(vals[0, 0, 0] @ aos.T, ref, atol=1e-12 * np.abs(ref).max())
+    h = 1e-5
+    for key, v in vals.items():
+        if sum(key) == 0:
+            continue
+        axis = next(a for a in range(3) if key[a] > 0)
+        lower = (key[0] - (axis == 0), key[1] - (axis == 1), key[2] - (axis == 2))
+        step = np.zeros(3)
+        step[axis] = h
+        fd = (aos.values(pts + step, 2)[lower] - aos.values(pts - step, 2)[lower]) / (2 * h)
+        np.testing.assert_allclose(v, fd, atol=1e-6 * np.abs(v).max())
+
+
+def test_cartesian_aos_blocks_add_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The isodensity Fock term and gradient are the same with the grid in many blocks."""
+    bs = core.BasisSet.build(psi4_molecule("water"), "ORBITAL", "def2-svp")
+    aos = CartesianAOs(bs, {0: 0, 1: 1, 2: 2})
+    live = settings("isodensity").cavity.build(
+        basis=aos.gaussian_basis, context=moist.Context(verbosity=0)
+    )
+    aos.bind_layout(*live.isodensity_layout())
+    rng = np.random.default_rng(5)
+    pts = rng.normal(size=(40, 3)) * 2.0
+    w2 = rng.normal(size=(40, 3, 3))
+    item = SimpleNamespace(
+        w_rho=rng.normal(size=40), w_grad_rho=rng.normal(size=(40, 3)), w_hess_rho=w2 + w2.mT
+    )
+    D = rng.normal(size=(aos.ncart, aos.ncart))
+    D = D + D.T
+    F, g = aos.fock(pts, item), aos.gradient(pts, D, item, 3)
+    monkeypatch.setattr(moist_host, "BLOCK_BYTES", 32 * aos.ncart * 8 * 7)  # 7 points
+    assert len(list(aos._blocks(len(pts), 32))) == 6
+    np.testing.assert_allclose(aos.fock(pts, item), F, rtol=1e-12, atol=1e-12 * abs(F).max())
+    np.testing.assert_allclose(aos.gradient(pts, D, item, 3), g, rtol=1e-12, atol=1e-12)
+
+
+def test_settings_are_checked() -> None:
+    cavity = CAVITIES["svdw"]()
+    with pytest.raises(TypeError, match="cavity"):
+        MoistSettings(cavity=object(), components=(COMPONENTS["cpcm"](),))
+    with pytest.raises(TypeError, match="components"):
+        MoistSettings(cavity=cavity, components=())
+    with pytest.raises(TypeError, match="components"):
+        MoistSettings(cavity=cavity, components=(object(),))
+
+
+@pytest.mark.parametrize("cavity", list(CAVITIES))
+def test_energy_runs_through_the_ddx_slot(cavity: str) -> None:
+    psi4.set_options(HF_OPTIONS)
+    psi4_swig_pcm.enable(settings(cavity))
+    E, wfn = psi4.energy("hf", molecule=psi4_molecule("formate"), return_wfn=True)
+    assert isinstance(wfn.ddx, MoistSolver)
+    assert wfn.ddx.charges.B is not None  # (k|mn) stored, on a grid that moves or not
+    E_solv = wfn.variable("DD SOLVATION ENERGY")
+    assert -0.2 < E_solv < -0.05  # an anion in water
+    psi4_swig_pcm.disable()
+    E_gas = psi4.energy("hf", molecule=psi4_molecule("formate"))
+    assert E_gas > E
+
+
+@pytest.mark.parametrize("cavity", ["svdw", "isodensity"])
+def test_gradient_makes_one_derivative_pass(cavity: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One pass of derivative integrals gives the gradient its dphi_dr (if moist asks: on a
+    fixed cavity) and the basis-centre term."""
+    psi4.set_options(HF_OPTIONS)
+    psi4_swig_pcm.enable(settings(cavity))
+    _, wfn = psi4.energy("hf", molecule=psi4_molecule("water"), return_wfn=True)
+    calls: list[bool] = []
+    original = GaussianCharges.esp_deriv1
+
+    def counted(self: GaussianCharges, *args: Any, **kwargs: Any) -> Any:
+        calls.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(GaussianCharges, "esp_deriv1", counted)
+    psi4.gradient("hf", molecule=psi4_molecule("water"), ref_wfn=wfn)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("cavity", "match"),
+    [("svdw", "w_dphi_dr"), ("isodensity", "d2phi_dr2")],  # _fock; _answer_all
+)
+def test_normal_derivative_models_are_refused(cavity: str, match: str) -> None:
+    """DPCM needs w_dphi_dr and second derivatives of the potential, not here yet."""
+    psi4.set_options(HF_OPTIONS)
+    psi4_swig_pcm.enable(settings(cavity, "dpcm"))
+    with pytest.raises(NotImplementedError, match=match) as raised:
+        psi4.energy("hf", molecule=psi4_molecule("water"))
+    assert "DPCM" in str(raised.value)
+
+
+def test_ghost_atoms_are_refused_on_an_isodensity_cavity() -> None:
+    psi4.set_options(HF_OPTIONS)
+    psi4_swig_pcm.enable(settings("isodensity"))
+    with pytest.raises(NotImplementedError, match="ghost"):
+        psi4.energy("hf", molecule=psi4_molecule("water_ghost_water"))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("cavity", "component", "name", "atoms"),
+    [
+        ("svdw", "cpcm", "formate", [0, 1, 3]),
+        ("isodensity", "cpcm", "formate", [0, 1, 3]),
+        ("svdw", "cpcm", "formyl", [1, 2]),  # UHF
+        ("isodensity", "cpcm", "formyl", [1, 2]),
+        ("svdw", "iefpcm", "formate", [1, 3]),
+        ("isodensity", "iefpcm", "formate", [1, 3]),
+        ("cfc", "cpcm", "formate", [1, 3]),
+        ("iswig", "cpcm", "formate", [1, 3]),
+        ("isodensity", "lpb", "formate", [1]),
+        ("svdw", "cpcm", "water_ghost_water", [0, 4]),  # 4: a ghost, basis functions only
+        ("svdw", "cpcm", "iodomethane", [1]),  # iodine's ECP: reduced nuclear charge
+        ("isodensity", "cpcm", "iodomethane", [1]),
+    ],
+)
+def test_gradient_matches_finite_differences(
+    cavity: str, component: str, name: str, atoms: list[int]
+) -> None:
+    """With an ECP, Psi4's gas-phase HF gradient itself differs from finite differences by
+    ~6e-8 along the C-I bond, so there the residual is taken relative to the gas one (as in
+    test_gradient.py)."""
+    reference = "uhf" if MOLECULES[name].multiplicity > 1 else "rhf"
+    psi4.set_options({**HF_OPTIONS, "reference": reference})
+    xyz = MOLECULES[name].bohr
+
+    def energy_at(atom: int, axis: int, step: float) -> float:
+        e: float = psi4.energy(
+            "hf", molecule=psi4_molecule(name, displaced(xyz, atom, axis, step))
+        )
+        return e
+
+    def residuals() -> dict[tuple[int, int], float]:
+        g = as_array(psi4.gradient("hf", molecule=psi4_molecule(name)))
+        return {
+            (a, c): g[a, c] - five_point(partial(energy_at, a, c), 2e-3)
+            for a in atoms
+            for c in range(3)
+        }
+
+    gas = residuals() if name == "iodomethane" else {}
+    psi4_swig_pcm.enable(settings(cavity, component))
+    for key, resid in residuals().items():
+        assert abs(resid - gas.get(key, 0.0)) < 1e-8, (key, resid)
+
+
+@pytest.mark.slow
+def test_dft_optimization_converges() -> None:
+    psi4.set_options({"basis": "def2-svp", "scf_type": "df", "g_convergence": "gau_tight"})
+    psi4_swig_pcm.enable(settings("svdw"))
+    mol = psi4_molecule("formate")
+    psi4.optimize("pbe0", molecule=mol)
+    g = as_array(psi4.gradient("pbe0", molecule=mol))
+    assert np.abs(g).max() < 1e-4
+
+
+# ------------------------------------------------------------------ against moist.pyscf
+
+
+@pytest.mark.pyscf
+@pytest.mark.parametrize("cavity", ["svdw", "isodensity"])
+@pytest.mark.parametrize("name", ["formate", "formyl"])
+def test_matches_moist_pyscf_host(cavity: str, name: str) -> None:
+    """Same moist model, two hosts: Psi4's integrals here, PySCF's in moist.pyscf."""
+    pytest.importorskip("pyscf")
+    import moist.pyscf
+    from pyscf import gto
+
+    m = MOLECULES[name]
+    mol = gto.M(
+        atom=list(zip(m.symbols, m.bohr.tolist(), strict=True)), unit="Bohr",
+        basis="def2-svp", charge=m.charge, spin=m.multiplicity - 1, verbose=0,
+    )  # fmt: skip
+    mf = mol.HF().MOIST(
+        cavity=CAVITIES[cavity](),
+        components=[moist.ModelComponentCPCM(EPS)],
+        context=moist.Context(nthreads=4, verbosity=0),
+    )
+    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-8
+    e_ref = mf.kernel()
+    g_ref = mf.nuc_grad_method().kernel()
+
+    reference = "uhf" if m.multiplicity > 1 else "rhf"
+    psi4.set_options({**HF_OPTIONS, "reference": reference})
+    psi4_swig_pcm.enable(settings(cavity))
+    G, wfn = psi4.gradient("hf", molecule=psi4_molecule(name), return_wfn=True)
+    assert abs(wfn.energy() - e_ref) < 1e-10
+    np.testing.assert_allclose(as_array(G), g_ref, atol=2e-8)  # UHF: PySCF converges to ~7e-9

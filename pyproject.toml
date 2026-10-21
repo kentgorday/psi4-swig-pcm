@@ -8,12 +8,14 @@ version = "0.1.0"
 description = "Switching/Gaussian (Lange-Herbert) PCM with analytic nuclear gradients for Psi4"
 readme = "README.md"
 requires-python = ">=3.13"
+# Apache-2.0: cavity.py (from PySCF); MPL-2.0: moist_contractions.py (from moist);
 # BSD-3-Clause: pybind11, compiled into the extension (built packages only; see NOTICE)
-license = "LGPL-3.0-only AND Apache-2.0 AND BSD-3-Clause"
+license = "LGPL-3.0-only AND Apache-2.0 AND MPL-2.0 AND BSD-3-Clause"
 license-files = [
     "COPYING",
     "COPYING.LESSER",
     "LICENSES/Apache-2.0.txt",
+    "LICENSES/MPL-2.0.txt",
     "LICENSES/pybind11-BSD-3-Clause.txt",
     "NOTICE",
 ]

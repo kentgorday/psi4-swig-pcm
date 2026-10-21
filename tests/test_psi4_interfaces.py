@@ -165,6 +165,8 @@ EXPECTED_PSI4_SYMBOLS = (
     "psi::Matrix::Matrix(",
     "psi::Matrix::add(",
     "psi::Matrix::zero(",
+    "psi::ThreeCenterOverlapInt::ThreeCenterOverlapInt(",  # gaussian_overlap_esp (moist host)
+    "psi::ThreeCenterOverlapInt::~ThreeCenterOverlapInt(",
     "typeinfo for psi::Matrix",
 )
 

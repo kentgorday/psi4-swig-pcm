@@ -50,7 +50,7 @@ def test_enable_and_disable_restore_psi4() -> None:
 def test_enabled_context_manager() -> None:
     with psi4_swig_pcm.enabled(PCMSettings(eps=4.0)):
         settings = psi4_swig_pcm.active_settings()
-        assert settings is not None
+        assert isinstance(settings, PCMSettings)
         assert settings.eps == 4.0
     assert psi4_swig_pcm.active_settings() is None
 
@@ -98,6 +98,14 @@ def test_restricted_open_shell_is_rejected() -> None:
     psi4_swig_pcm.enable()
     with pytest.raises(NotImplementedError, match="ROHF"):
         psi4.gradient("hf", molecule=psi4_molecule("formyl"))
+
+
+def test_enable_refuses_other_settings() -> None:
+    """A TypeError, with or without moist installed (moist_host is never imported for it)."""
+    with pytest.raises(TypeError, match="PCMSettings or MoistSettings"):
+        psi4_swig_pcm.enable("IEF-PCM")  # type: ignore[arg-type]
+    assert psi4_swig_pcm.active_settings() is None
+    assert not core.get_option("SCF", "DDX")
 
 
 def test_failed_enable_leaves_psi4_untouched(monkeypatch: pytest.MonkeyPatch) -> None:

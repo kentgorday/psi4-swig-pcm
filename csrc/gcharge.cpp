@@ -10,6 +10,12 @@
 //   V[m,n]    = sum_k  q_k  (k|mn)          Fock contribution of Gaussian charges q
 //   B[k, mn]  = (k|mn), m >= n              the integrals themselves, for in-core reuse
 //
+// and, for the moist host (moist_host.py), first derivatives and three-centre overlaps:
+//
+//   field[k]  = sum_mn D_mn d(k|mn)/dr_k                 derivative of phi_el[k] in point k
+//   grad[A]   = sum_k w_k sum_mn D_mn d(k|mn)/dR_A       basis-function centres, points fixed
+//   s[k]      = sum_mn D_mn (k m n)                      overlap with the density (no screening)
+//
 // The aux basis must be built the way psi4's proc.py builds "diffuse" external charges
 // (ghost He s-shells + negative_gaussian_normalization_to_coefficients), so (k|mn) already
 // carries the electron sign: phi_el is the electrons' potential (negative) and V is the matrix
@@ -36,6 +42,7 @@
 #include <omp.h>
 #endif
 
+#include "psi4/libmints/3coverlap.h"
 #include "psi4/libmints/basisset.h"
 #include "psi4/libmints/integral.h"
 #include "psi4/libmints/matrix.h"
@@ -50,11 +57,11 @@ namespace gcharge {
 namespace {
 
 std::vector<std::shared_ptr<TwoBodyAOInt>> make_ints(std::shared_ptr<BasisSet> aux, std::shared_ptr<BasisSet> basis,
-                                                     int nthreads) {
+                                                     int nthreads, int deriv = 0) {
     auto zero = BasisSet::zero_ao_basis_set();
     auto fact = std::make_shared<IntegralFactory>(aux, zero, basis, basis);
     std::vector<std::shared_ptr<TwoBodyAOInt>> eri(nthreads);
-    eri[0] = std::shared_ptr<TwoBodyAOInt>(fact->eri());
+    eri[0] = std::shared_ptr<TwoBodyAOInt>(fact->eri(deriv));
     for (int t = 1; t < nthreads; t++) eri[t] = std::shared_ptr<TwoBodyAOInt>(eri[0]->clone());
     return eri;
 }
@@ -186,6 +193,109 @@ void gaussian_3c_packed_into(std::shared_ptr<BasisSet> aux, std::shared_ptr<Basi
     }
 }
 
+// First derivatives of (k|mn), contracted with a symmetric D (used by the moist host):
+//   field[k, x] = sum_mn D_mn d(k|mn)/dr_k,x               d phi_el[k] / d (position of point k)
+//   grad[A, x]  = sum_k w_k sum_mn D_mn d(k|mn)/dR_A,x     basis-function centres only, points fixed
+// w (one entry per aux function, the anchor's zero included) may be None: grad is then zero.
+// natom: atoms of basis's molecule (shell centres index them).
+// Psi4 1.11 returns the (P 0|M N) derivatives as 12 buffers: x, y, z of P, M and N, then three
+// zero buffers for the dummy centre.  Translational invariance (P + M + N = 0) is checked by the
+// tests.
+std::pair<SharedMatrix, SharedMatrix> gaussian_esp_deriv1(std::shared_ptr<BasisSet> aux,
+                                                          std::shared_ptr<BasisSet> basis, SharedMatrix D,
+                                                          SharedVector w, int natom, int nthreads) {
+    if (w && w->dim() != aux->nbf()) throw std::invalid_argument("w: one entry per aux function");
+    for (int s = 0; s < basis->nshell(); s++)
+        if (basis->shell(s).ncenter() >= natom) throw std::invalid_argument("natom: too few atoms");
+    auto eri = make_ints(aux, basis, nthreads, 1);
+    auto field = std::make_shared<Matrix>("Gaussian ESP derivative", aux->nbf(), 3);
+    std::vector<std::vector<double>> gt(nthreads, std::vector<double>(3 * natom, 0.0));
+    double** Fp = field->pointer();
+    double** Dp = D->pointer();
+    const double* wp = w ? w->pointer() : nullptr;
+
+#pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+    for (int P = 0; P < aux->nshell(); P++) {
+        const int rank = thread_rank();
+        TwoBodyAOInt& ints = *eri[rank];
+        double* g = gt[rank].data();
+        const int nP = aux->shell(P).nfunction(), oP = aux->shell(P).function_index();
+        for (const auto& [M, N] : ints.shell_pairs()) {
+            if (ints.compute_shell_deriv1(P, 0, M, N) == 0) continue;
+            const auto& buf = ints.buffers();
+            const auto& sM = basis->shell(M);
+            const auto& sN = basis->shell(N);
+            const int oM = sM.function_index(), nM = sM.nfunction(), aM = sM.ncenter();
+            const int oN = sN.function_index(), nN = sN.nfunction(), aN = sN.ncenter();
+            const double fac = M == N ? 1.0 : 2.0;  // D symmetric: (n, m) too
+            for (int x = 0; x < 3; x++) {
+                const double* bP = buf[x];
+                const double* bM = buf[3 + x];
+                const double* bN = buf[6 + x];
+                for (int p = 0, idx = 0; p < nP; p++) {
+                    double sP = 0.0, sMx = 0.0, sNx = 0.0;
+                    for (int m = 0; m < nM; m++)
+                        for (int n = 0; n < nN; n++, idx++) {
+                            const double d = Dp[oM + m][oN + n];
+                            if (bP) sP += d * bP[idx];
+                            if (bM) sMx += d * bM[idx];
+                            if (bN) sNx += d * bN[idx];
+                        }
+                    Fp[oP + p][x] += fac * sP;
+                    if (wp) {
+                        g[3 * aM + x] += fac * wp[oP + p] * sMx;
+                        g[3 * aN + x] += fac * wp[oP + p] * sNx;
+                    }
+                }
+            }
+        }
+    }
+    auto grad = std::make_shared<Matrix>("Gaussian ESP basis-centre gradient", natom, 3);
+    double** Gp = grad->pointer();
+    for (int t = 0; t < nthreads; t++)
+        for (int a = 0; a < natom; a++)
+            for (int x = 0; x < 3; x++) Gp[a][x] += gt[t][3 * a + x];
+    return {field, grad};
+}
+
+// s[k] = sum_mn D_mn (k m n), the three-centre overlap of each aux function with the density
+// (D symmetric).  With the charge-normalized, electron-signed aux functions this is
+// -(a_k/pi)^(3/2) int rho(r) exp(-a_k |r - r_k|^2) dr, a_k the exponent.  No screening.
+SharedVector gaussian_overlap_esp(std::shared_ptr<BasisSet> aux, std::shared_ptr<BasisSet> basis, SharedMatrix D,
+                                  int nthreads) {
+    std::vector<std::unique_ptr<ThreeCenterOverlapInt>> ints;
+    for (int t = 0; t < nthreads; t++) ints.push_back(std::make_unique<ThreeCenterOverlapInt>(aux, basis, basis));
+    auto s = std::make_shared<Vector>("Gaussian overlap", aux->nbf());
+    double* sp = s->pointer();
+    double** Dp = D->pointer();
+    const int nshell = basis->nshell();
+
+#pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+    for (int P = 0; P < aux->nshell(); P++) {
+        ThreeCenterOverlapInt& s3 = *ints[thread_rank()];
+        const int nP = aux->shell(P).nfunction(), oP = aux->shell(P).function_index();
+        std::vector<double> acc(nP, 0.0);
+        for (int M = 0; M < nshell; M++) {
+            const int oM = basis->shell(M).function_index(), nM = basis->shell(M).nfunction();
+            for (int N = 0; N <= M; N++) {
+                const int oN = basis->shell(N).function_index(), nN = basis->shell(N).nfunction();
+                s3.compute_shell(P, M, N);
+                const double* buf = s3.buffers()[0];
+                if (!buf) continue;
+                const double fac = M == N ? 1.0 : 2.0;
+                for (int p = 0, idx = 0; p < nP; p++) {
+                    double t = 0.0;
+                    for (int m = 0; m < nM; m++)
+                        for (int n = 0; n < nN; n++, idx++) t += Dp[oM + m][oN + n] * buf[idx];
+                    acc[p] += fac * t;
+                }
+            }
+        }
+        for (int p = 0; p < nP; p++) sp[oP + p] = acc[p];
+    }
+    return s;
+}
+
 }  // namespace gcharge
 }  // namespace psi
 
@@ -198,4 +308,9 @@ PYBIND11_MODULE(_gcharge, m) {
           py::arg("nthreads"), py::call_guard<py::gil_scoped_release>());
     m.def("gaussian_potential_matrix", &psi::gcharge::gaussian_potential_matrix, py::arg("aux"), py::arg("basis"),
           py::arg("q"), py::arg("nthreads"), py::call_guard<py::gil_scoped_release>());
+    m.def("gaussian_esp_deriv1", &psi::gcharge::gaussian_esp_deriv1, py::arg("aux"), py::arg("basis"), py::arg("D"),
+          py::arg("w").none(true), py::arg("natom"), py::arg("nthreads"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("gaussian_overlap_esp", &psi::gcharge::gaussian_overlap_esp, py::arg("aux"), py::arg("basis"),
+          py::arg("D"), py::arg("nthreads"), py::call_guard<py::gil_scoped_release>());
 }

@@ -21,7 +21,8 @@ ExternalPotential and gradients_on_gaussians can be used on them.  Two complicat
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 from psi4 import core
@@ -29,11 +30,40 @@ from scipy.spatial import cKDTree
 
 # _gcharge resolves its Psi4 symbols from psi4.core, which the import above has loaded.
 from . import _gcharge
-from .cavity import FloatArray, IntArray, Surface
+from .cavity import FloatArray, IntArray
 
 CLOSE_POINT_TOL = 0.1  # bohr; a Psi4 Molecule rejects atoms closer than this
 ANCHOR_OFFSET = np.array([17.31, -23.93, 31.71])  # bohr from a set's centroid
 ANCHOR_EXPONENT = 1.0
+
+
+class PointSet(Protocol):
+    """What GaussianCharges needs of a surface: point positions and Gaussian widths (bohr).
+
+    Satisfied by cavity.Surface and by GaussianPoints.
+    """
+
+    @property
+    def coords(self) -> FloatArray: ...  # (npts, 3)
+    @property
+    def xi(self) -> FloatArray: ...  # the charge at a point is exp(-(xi r)^2), normalized
+    @property
+    def npts(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class GaussianPoints:
+    """A PointSet from bare arrays: positions (npts, 3) and Gaussian widths xi (bohr).
+
+    The grid of a moist cavity (moist_host) takes this form, as do test points.
+    """
+
+    coords: FloatArray
+    xi: FloatArray
+
+    @property
+    def npts(self) -> int:
+        return len(self.xi)
 
 
 def split_close_points(points: FloatArray, tol: float = CLOSE_POINT_TOL) -> list[IntArray]:
@@ -91,12 +121,13 @@ class GaussianCharges:
 
     def __init__(
         self,
-        surf: Surface,
+        surf: PointSet,
         nthreads: int,
         basis: core.BasisSet | None = None,
         incore_mb: float = 0.0,
     ) -> None:
         self.n, self.nthreads = surf.npts, nthreads
+        self.xi: FloatArray = np.asarray(surf.xi)
         self.sets: list[tuple[IntArray, Any]] = [
             (idx, gaussian_basis(surf.coords[idx], surf.xi[idx] ** 2))
             for idx in split_close_points(surf.coords)
@@ -136,6 +167,38 @@ class GaussianCharges:
             qv = core.Vector.from_array(np.append(q[idx], 0.0))
             Vm.add(_gcharge.gaussian_potential_matrix(aux, basis, qv, self.nthreads))
         return Vm
+
+    def esp_deriv1(
+        self, basis: core.BasisSet, D: core.Matrix, w: FloatArray | None = None
+    ) -> tuple[FloatArray, FloatArray]:
+        """(field, grad) of the electronic potential, D symmetric:
+
+        field (npts, 3): d phi_el[k] / d (position of point k);
+        grad (natom, 3): sum_k w_k d phi_el[k] / dR_A over the basis-function centres, points
+        held fixed (zero when w is None).
+        """
+        field = np.empty((self.n, 3))
+        grad = np.zeros((basis.molecule().natom(), 3))
+        for idx, aux in self.sets:
+            wv = None if w is None else core.Vector.from_array(np.append(w[idx], 0.0))
+            f, g = _gcharge.gaussian_esp_deriv1(aux, basis, D, wv, len(grad), self.nthreads)
+            field[idx] = np.asarray(f.np)[:-1]
+            grad += np.asarray(g.np)
+        return field, grad
+
+    def esp_dxi(self, basis: core.BasisSet, D: core.Matrix) -> FloatArray:
+        """d phi_el[k] / d xi_k, D symmetric.
+
+        d/dxi erf(xi r)/r = (2/sqrt(pi)) exp(-xi^2 r^2), so this is a three-centre overlap; the
+        aux functions carry -(xi^2/pi)^(3/2), which the prefactor undoes.
+        """
+        s = np.empty(self.n)
+        for idx, aux in self.sets:
+            s3 = _gcharge.gaussian_overlap_esp(aux, basis, D, self.nthreads)
+            s[idx] = np.asarray(s3.np)[:-1]
+        xi = self.xi
+        out: FloatArray = 2.0 / np.sqrt(np.pi) * (np.pi / xi**2) ** 1.5 * s
+        return out
 
     def external_potential(self, q: FloatArray) -> core.ExternalPotential:
         """The charges q as a Psi4 ExternalPotential (for the SCF gradient)."""

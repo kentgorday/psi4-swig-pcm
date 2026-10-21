@@ -4,8 +4,9 @@
 
 enable() makes these process-global changes, all undone by disable():
 
-1. Psi4's DDX solvation slot (procrouting.solvent.ddx) holds PCMSolver and the DDX option is
-   on, so every SCF includes the reaction field.
+1. Psi4's DDX solvation slot (procrouting.solvent.ddx) holds the solver, and the DDX option is
+   on, so every SCF includes the reaction field.  The solver is PCMSolver, or for a moist model
+   (prototype) moist_host.MoistSolver.
 2. Every SCF entry of psi4.driver.procedures["gradient"] (proc.select_scf_gradient) is wrapped
    to add the PCM terms.  Psi4 1.11 has no DDX gradient: without this, psi4.gradient() returns
    the solvated SCF's gradient without them, and nothing warns.
@@ -21,7 +22,9 @@ the reference orbitals: the correlation energy itself has no PCM response.
 
 The SCF gradient itself runs Psi4's own run_scf_gradient with the converged symmetrized
 charges frozen on an ExternalPotential (their interaction with electrons and nuclei, plus -D),
-then adds the motion of the charges with their atoms and the cavity term.
+then adds the motion of the charges with their atoms and the cavity term.  For a moist model it
+is Psi4's own SCF gradient at the solvated density, with no external potential, plus
+MoistSolver.gradient().
 
 With PCMSettings.nonelectrostatic, the correction G enters in one of two ways:
 
@@ -41,11 +44,12 @@ With PCMSettings.nonelectrostatic, the correction G enters in one of two ways:
 from __future__ import annotations
 
 import functools
+import sys
 import types
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import numpy as np
 from psi4 import core
@@ -59,6 +63,9 @@ from . import solver as _solver
 from .cavity import FloatArray
 from .solver import PCMSettings, PCMSolver
 
+if TYPE_CHECKING:
+    from .moist_host import MoistSettings, MoistSolver
+
 # lambda of the post-SCF gradient's perturbed SCFs (at +-lambda and +-2 lambda).  The
 # central difference at lambda is off by O(lambda^2), ~1e-5 of the response term at 1e-2
 # for formate; the extrapolation removes that, and leaves the SCFs' convergence error over
@@ -71,7 +78,7 @@ _MISSING = object()
 
 @dataclass
 class _Patch:
-    settings: PCMSettings
+    settings: PCMSettings | MoistSettings
     have_ddx: Any
     ddx: Any
     options: Any  # p4util.OptionsState for DDX
@@ -82,11 +89,16 @@ class _Patch:
 _active: _Patch | None = None
 
 
-def enable(settings: PCMSettings | None = None) -> None:
-    """Make psi4.energy/gradient/optimize/hessian/frequency include the PCM (process-global)."""
+def enable(settings: PCMSettings | MoistSettings | None = None) -> None:
+    """Make psi4.energy/gradient/optimize/hessian/frequency include the PCM (process-global).
+
+    settings: PCMSettings for this package's switching/Gaussian PCM, or (prototype)
+    moist_host.MoistSettings for a moist cavity and model.
+    """
     global _active
     disable()
     settings = PCMSettings() if settings is None else settings
+    solver_class = _solver_class(settings)
     # Recorded before anything changes, so that disable() can undo a partial enable().
     _active = patch = _Patch(
         settings=settings,
@@ -98,7 +110,7 @@ def enable(settings: PCMSettings | None = None) -> None:
         p4solvent._have_ddx = True
         p4solvent.ddx = types.SimpleNamespace(
             get_ddx_options=lambda molecule: {},
-            DdxInterface=functools.partial(PCMSolver, settings),
+            DdxInterface=functools.partial(solver_class, settings),
         )
         core.set_global_option("DDX", True)
         wrapper = _wrap_scf_gradient(proc.select_scf_gradient)
@@ -141,7 +153,7 @@ def disable() -> None:
 
 
 @contextmanager
-def enabled(settings: PCMSettings | None = None) -> Iterator[None]:
+def enabled(settings: PCMSettings | MoistSettings | None = None) -> Iterator[None]:
     """enable() for the duration of a with block."""
     enable(settings)
     try:
@@ -150,7 +162,30 @@ def enabled(settings: PCMSettings | None = None) -> Iterator[None]:
         disable()
 
 
-def active_settings() -> PCMSettings | None:
+# moist_host needs moist, so it is never imported here: whoever made MoistSettings, or enabled
+# them, has imported it.
+
+
+def _moist_host() -> types.ModuleType | None:
+    return sys.modules.get(f"{__package__}.moist_host")
+
+
+def _solver_class(settings: Any) -> type:
+    if isinstance(settings, PCMSettings):
+        return PCMSolver
+    moist_host = _moist_host()
+    if moist_host is not None and isinstance(settings, moist_host.MoistSettings):
+        solver: type = moist_host.MoistSolver
+        return solver
+    raise TypeError(f"settings must be PCMSettings or MoistSettings, not {type(settings)}")
+
+
+def _is_moist_solver(sol: Any) -> TypeGuard[MoistSolver]:
+    moist_host = _moist_host()
+    return moist_host is not None and isinstance(sol, moist_host.MoistSolver)
+
+
+def active_settings() -> PCMSettings | MoistSettings | None:
     """The settings of the current enable(), or None."""
     return None if _active is None else _active.settings
 
@@ -278,21 +313,20 @@ def post_scf_gradient(name: str, ref_wfn: core.Wavefunction, **kwargs: Any) -> F
 def gradient_from_wfn(name: str, wfn: core.Wavefunction) -> FloatArray:
     """Analytic PCM gradient (natm, 3) for an SCF converged with the PCM in the DDX slot."""
     sol = getattr(wfn, "ddx", None)
-    if not isinstance(sol, PCMSolver):
+    if not (isinstance(sol, PCMSolver) or _is_moist_solver(sol)):
         raise ValueError("wfn was not converged with psi4_swig_pcm enabled")
     if not isinstance(wfn, core.RHF | core.UHF):
         raise NotImplementedError(f"PCM gradients for {type(wfn).__name__} references")
     if wfn.external_pot() is not None:
         raise NotImplementedError("PCM gradients with another external potential on the wfn")
+    if not isinstance(sol, PCMSolver):
+        return _moist_gradient(name, wfn, sol)
     ep = sol.charges.external_potential(sol.q_sym)
     wfn.set_external_potential(ep)
     try:
         # SCF gradient with the charges frozen: their interaction with electrons and nuclei
-        # (Psi4's C++), plus Psi4's own -D gradient.  run_scf_gradient sets REFERENCE to
-        # RKS/UKS for scfgrad, but only knows a custom (dict) functional is DFT from
-        # dft_functional.
-        kwargs = {"dft_functional": True} if wfn.functional().needs_xc() else {}
-        g = np.array(proc.run_scf_gradient(name.lower(), ref_wfn=wfn, **kwargs).gradient().np)
+        # (Psi4's C++), plus Psi4's own -D gradient.
+        g = _psi4_scf_gradient(name, wfn)
         g_pts = sol.charges.point_gradients(ep)  # the charges move with their atoms
     finally:
         wfn.set_external_potential(None)
@@ -303,3 +337,24 @@ def gradient_from_wfn(name: str, wfn: core.Wavefunction) -> FloatArray:
     if ne is not None and ne.self_consistent:
         g += sol.terms.gradient(_total_density(wfn))
     return g
+
+
+def _psi4_scf_gradient(name: str, wfn: core.Wavefunction) -> FloatArray:
+    # run_scf_gradient sets REFERENCE to RKS/UKS for scfgrad, but only knows a custom (dict)
+    # functional is DFT from dft_functional.
+    kwargs = {"dft_functional": True} if wfn.functional().needs_xc() else {}
+    g: FloatArray = np.array(
+        proc.run_scf_gradient(name.lower(), ref_wfn=wfn, **kwargs).gradient().np
+    )
+    return g
+
+
+def _moist_gradient(name: str, wfn: core.Wavefunction, sol: MoistSolver) -> FloatArray:
+    """Psi4's SCF gradient at the solvated density, plus moist's part (no external potential).
+
+    Psi4's energy-weighted density comes from the converged orbital energies, which include
+    moist's Fock contribution, so its Pulay term is already the solvated one.
+    """
+    D = wfn.Da().clone()
+    D.add(wfn.Db())
+    return _psi4_scf_gradient(name, wfn) + sol.gradient(D)

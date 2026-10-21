@@ -172,6 +172,10 @@ A change to the recipe has to suit both:
 
 - **No Psi4.** The package must not depend on it.
 - **One Python.** The recipe pins the Python both repositories use (3.13).
+- **Its Fortran libraries stay inside.** The libraries moist's meson wraps (mctc-lib, toml-f
+  and others) are linked statically into its extension and not installed, so they cannot
+  clash with conda-forge's packages of the same names: xtb brings `mctc-lib` into
+  tautomator's environment.
 - **BLAS/LAPACK from the environment.** The recipe builds against the netlib variants of
   `libblas`/`liblapack`, as conda-forge's own builds do, so moist runs on whatever the
   environment selects: Accelerate on osx-arm64; OpenBLAS here and MKL in tautomator on

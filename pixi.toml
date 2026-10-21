@@ -45,6 +45,8 @@ scipy = ">=1.15"
 [dependencies]
 python = "3.13.*"
 psi4 = "1.11.*"
+# qcelemental 0.51.3 defines a unit ("J^{-2}") that pint 0.26.2 rejects, which breaks optking.
+qcelemental = ">=0.51.4"
 # This repository's own package, built by pixi-build and installed editable.
 psi4-swig-pcm = { path = "." }
 pytest = ">=9.0.3,<10"

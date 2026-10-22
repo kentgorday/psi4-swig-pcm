@@ -9,6 +9,7 @@ comparisons in moist-crosscheck (pixi run -e moist-crosscheck crosscheck-moist).
 from __future__ import annotations
 
 import gc
+import os
 import weakref
 from collections.abc import Callable
 from functools import partial
@@ -239,7 +240,20 @@ def test_dft_optimization_converges() -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("cavity", ["svdw", "isodensity"])
+@pytest.mark.parametrize(
+    "cavity",
+    [
+        "svdw",
+        pytest.param(
+            "isodensity",
+            marks=pytest.mark.skipif(
+                not os.environ.get("PSI4_SWIG_PCM_VERY_SLOW"),
+                reason="~7 min (rho-DROP rebuilds its grid every SCF); "
+                "set PSI4_SWIG_PCM_VERY_SLOW=1 to run it",
+            ),
+        ),
+    ],
+)
 def test_frequencies_from_gradients_match_energies(cavity: str) -> None:
     """psi4.frequency at a tightly optimized geometry: finite differences of moist gradients
     against finite differences of energies (as test_driver's for the switching/Gaussian PCM)."""

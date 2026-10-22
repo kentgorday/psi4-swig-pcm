@@ -47,6 +47,7 @@ CAVITIES: dict[str, Callable[[], Any]] = {
 COMPONENTS: dict[str, Callable[[], Any]] = {
     "cpcm": lambda: moist.ModelComponentCPCM(EPS),
     "iefpcm": lambda: moist.ModelComponentIEFPCM(EPS),
+    "ssvpe": lambda: moist.ModelComponentSSVPE(EPS),
     "lpb": lambda: moist.ModelComponentLPB(EPS, 0.1),
     "dpcm": lambda: moist.ModelComponentDPCM(EPS),
 }
@@ -237,14 +238,51 @@ def test_dft_optimization_converges() -> None:
     assert np.abs(g).max() < 1e-4
 
 
+@pytest.mark.slow
+@pytest.mark.parametrize("cavity", ["svdw", "isodensity"])
+def test_frequencies_from_gradients_match_energies(cavity: str) -> None:
+    """psi4.frequency at a tightly optimized geometry: finite differences of moist gradients
+    against finite differences of energies (as test_driver's for the switching/Gaussian PCM)."""
+    psi4.set_options({**HF_OPTIONS, "g_convergence": "gau_verytight", "geom_maxiter": 50})
+    mol = psi4_molecule("formate")
+    psi4_swig_pcm.enable(settings(cavity))
+    psi4.optimize("hf", molecule=mol)
+    assert np.abs(as_array(psi4.gradient("hf", molecule=mol))).max() < 2e-6
+
+    _, wfn_g = psi4.frequency("hf", molecule=mol, return_wfn=True)
+    _, wfn_e = psi4.frequency("hf", molecule=mol, dertype=0, return_wfn=True)
+    f_g = wfn_g.frequencies().to_array()
+    f_e = wfn_e.frequencies().to_array()
+    assert len(f_g) == 6
+    assert (f_g > 0).all()
+    np.testing.assert_allclose(f_g, f_e, atol=0.05)
+
+
 # ------------------------------------------------------------------ against moist.pyscf
 
 
 @pytest.mark.pyscf
-@pytest.mark.parametrize("cavity", ["svdw", "isodensity"])
-@pytest.mark.parametrize("name", ["formate", "formyl"])
-def test_matches_moist_pyscf_host(cavity: str, name: str) -> None:
-    """Same moist model, two hosts: Psi4's integrals here, PySCF's in moist.pyscf."""
+@pytest.mark.parametrize(
+    ("cavity", "component", "name"),
+    [
+        ("svdw", "cpcm", "formate"),
+        ("svdw", "cpcm", "formyl"),  # UHF
+        ("isodensity", "cpcm", "formate"),
+        ("isodensity", "cpcm", "formyl"),
+        ("cfc", "cpcm", "formate"),
+        ("iswig", "cpcm", "formate"),
+        ("svdw", "iefpcm", "formate"),
+        ("iswig", "iefpcm", "formate"),
+        ("svdw", "ssvpe", "formate"),
+        ("isodensity", "lpb", "formate"),
+        ("isodensity", "iefpcm", "formyl"),
+        ("cfc", "iefpcm", "formyl"),
+    ],
+)
+def test_matches_moist_pyscf_host(cavity: str, component: str, name: str) -> None:
+    """Same moist model, two hosts: Psi4's integrals here, PySCF's in moist.pyscf.  Every
+    cavity and every supported component, closed and open shell: the finite-difference tests
+    check each gradient against its own energy, this checks the energy."""
     pytest.importorskip("pyscf")
     import moist.pyscf
     from pyscf import gto
@@ -256,7 +294,7 @@ def test_matches_moist_pyscf_host(cavity: str, name: str) -> None:
     )  # fmt: skip
     mf = mol.HF().MOIST(
         cavity=CAVITIES[cavity](),
-        components=[moist.ModelComponentCPCM(EPS)],
+        components=[COMPONENTS[component]()],
         context=moist.Context(nthreads=4, verbosity=0),
     )
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-8
@@ -265,7 +303,7 @@ def test_matches_moist_pyscf_host(cavity: str, name: str) -> None:
 
     reference = "uhf" if m.multiplicity > 1 else "rhf"
     psi4.set_options({**HF_OPTIONS, "reference": reference})
-    psi4_swig_pcm.enable(settings(cavity))
+    psi4_swig_pcm.enable(settings(cavity, component))
     G, wfn = psi4.gradient("hf", molecule=psi4_molecule(name), return_wfn=True)
     assert abs(wfn.energy() - e_ref) < 1e-10
     np.testing.assert_allclose(as_array(G), g_ref, atol=2e-8)  # UHF: PySCF converges to ~7e-9

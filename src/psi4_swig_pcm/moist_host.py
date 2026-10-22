@@ -46,7 +46,8 @@ every SCF iteration; stored, they still serve both its potential and its Fock ma
 Not supported yet (NotImplementedError): the models that use the normal derivative of the
 potential (moist's DPCM in both forms, SLIC and the nonlocal model: w_dphi_dr and second
 derivatives of the potential), GOSTSHYP's Gaussian moments, ghost atoms with an isodensity
-cavity, ROHF, and the CPSCF (nonequilibrium) response.  C-PCM, COSMO, IEF-PCM, SS(V)PE and LPB
+cavity, ROHF gradients (ROHF energies work; the driver refuses the gradient), and the CPSCF
+(nonequilibrium) response.  C-PCM, COSMO, IEF-PCM, SS(V)PE and LPB
 work on every cavity.
 """
 

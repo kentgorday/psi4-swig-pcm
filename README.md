@@ -155,13 +155,17 @@ external potential. The `(k|mn)` are stored for a grid when they fit `incore_mb`
 SWIG). ρ-DROP has a new grid every SCF iteration, but stored integrals still serve both its
 potential and its Fock matrix.
 
-- **Checked:** total energies match moist's PySCF host to 3e-12 Eh and gradients to 7e-9
-  Eh/bohr (RHF and UHF, SvdW-DROP and ρ-DROP). Gradients match finite differences of energies
-  to 1e-8 Eh/bohr on SvdW-, CFC- and ρ-DROP and on iSwiG; for C-PCM, IEF-PCM and LPB; with
-  ghost atoms (SvdW-DROP), and with iodine's ECP.
+- **Checked:** total energies match moist's PySCF host to 5e-12 Eh and gradients to 7e-9
+  Eh/bohr, on SvdW-, CFC- and ρ-DROP and on iSwiG; for C-PCM, IEF-PCM, SS(V)PE and LPB; RHF
+  and UHF. Gradients match finite differences of energies to 1e-8 Eh/bohr on every cavity;
+  with ghost atoms (SvdW-DROP), and with iodine's ECP (which moist's PySCF host refuses, so
+  there is no reference energy for it). moist has no analytic Hessian, and needs none here:
+  `psi4.frequency` takes finite differences of the analytic gradients, and on SvdW- and
+  ρ-DROP those frequencies match finite differences of energies to 0.05 cm⁻¹.
 - **Not yet:** the models that use the normal derivative of the potential (DPCM in both
   forms, SLIC, nonlocal) need its second derivatives and raise `NotImplementedError`. Also
-  missing: GOSTSHYP's Gaussian moments, ghost atoms on ρ-DROP, and the CPSCF response.
+  missing: GOSTSHYP's Gaussian moments, ghost atoms on ρ-DROP, ROHF gradients (ROHF energies
+  work), and the CPSCF response.
 - **Cost:** on glycine zwitterion (PBE0/def2-TZVP, 4 threads) an energy and gradient costs
   1.2× the gas-phase job on SvdW-DROP and 5.2× on ρ-DROP. ρ-DROP's grid moves every
   SCF iteration, so every iteration also needs the derivatives of the potential at the moved

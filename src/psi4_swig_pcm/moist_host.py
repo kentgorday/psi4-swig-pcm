@@ -61,9 +61,12 @@ import moist
 import numpy as np
 from psi4 import core
 
+from . import solver as _solver
 from .cavity import FloatArray, IntArray
 from .charges import GaussianCharges, GaussianPoints
 from .moist_contractions import density_fock, density_gradient, nuclear_potential
+from .nonelectrostatic import Energies, NonelectrostaticSettings
+from .nonelectrostatic_drop import DropTerms
 
 #: Psi4 may store the (k|mn) of a cavity grid in core up to this size.
 DEFAULT_INCORE_MB = 2000.0
@@ -82,6 +85,8 @@ class MoistSettings:
     verbosity: moist's own printout, which goes to the process's stdout (0 = silent).
     incore_mb: as PCMSettings.incore_mb: the (k|mn) of a grid are stored if they fit.  An
     isodensity cavity's grid moves every SCF iteration, so they are rebuilt each time.
+    nonelectrostatic: the nonelectrostatic correction on moist's surface
+    (nonelectrostatic_drop), post-SCF or self-consistent as its settings say, or None.
     """
 
     cavity: Any
@@ -89,6 +94,7 @@ class MoistSettings:
     nthreads: int = 0
     verbosity: int = 0
     incore_mb: float = DEFAULT_INCORE_MB
+    nonelectrostatic: NonelectrostaticSettings | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.cavity, moist.CavityConfiguration):
@@ -320,6 +326,8 @@ class MoistSolver:
         self.response: Any = None
         self.energy = 0.0
         self.calls = 0
+        self._terms: DropTerms | None = None
+        self.e_nonelectrostatic: Energies | None = None
         if not self.density_dependent:
             self._build(None)
         self._print_header()
@@ -447,7 +455,28 @@ class MoistSolver:
         if elec_only or nonequilibrium:
             raise NotImplementedError("moist: electronic-only / nonequilibrium (CPSCF) response")
         self._evaluate(D)
-        return self.energy, self._fock(), state
+        energy, V = self.energy, self._fock()
+        ne = self.settings.nonelectrostatic
+        if ne is not None and ne.self_consistent:
+            energies, Vg = self.terms.energy_and_potential(np.asarray(D.np))
+            self.e_nonelectrostatic = energies
+            energy += energies.total
+            V.add(core.Matrix.from_array(Vg))
+        if _solver._perturbation is not None:  # driver.post_scf_gradient's perturbed SCFs
+            lam, V0 = _solver._perturbation
+            energy += lam * float(np.sum(V0 * np.asarray(D.np)))
+            V.add(core.Matrix.from_array(lam * V0))
+        return energy, V, state
+
+    @property
+    def terms(self) -> DropTerms:
+        """The nonelectrostatic correction on this geometry's cavity (built on first use)."""
+        ne = self.settings.nonelectrostatic
+        if ne is None:
+            raise ValueError("these MoistSettings have no nonelectrostatic correction")
+        if self._terms is None:
+            self._terms = DropTerms(self, ne, self.nthreads)
+        return self._terms
 
     def gradient(self, D: core.Matrix) -> FloatArray:
         """moist's part of the nuclear gradient at the total density D, (natom, 3).
@@ -488,4 +517,7 @@ class MoistSolver:
                 )
             else:
                 raise NotImplementedError(f"moist response item {item.name!r}")
+        ne = self.settings.nonelectrostatic
+        if ne is not None and ne.self_consistent:
+            g += self.terms.gradient(np.asarray(D.np))
         return g

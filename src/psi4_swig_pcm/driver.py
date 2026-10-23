@@ -260,9 +260,15 @@ def _run_scf(name: str, **kwargs: Any) -> core.Wavefunction:
         optstash.restore()
 
 
+def _nonelectrostatic(sol: Any) -> Any:
+    """The nonelectrostatic settings of a PCMSolver or MoistSolver, or None."""
+    if isinstance(sol, PCMSolver) or _is_moist_solver(sol):
+        return sol.settings.nonelectrostatic
+    return None
+
+
 def _post_scf(wfn: core.Wavefunction) -> bool:
-    sol = getattr(wfn, "ddx", None)
-    ne = sol.settings.nonelectrostatic if isinstance(sol, PCMSolver) else None
+    ne = _nonelectrostatic(getattr(wfn, "ddx", None))
     return ne is not None and not ne.self_consistent
 
 
@@ -285,8 +291,8 @@ def _wrap_scf_energy(original: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(original)
     def scf_energy(name: str, **kwargs: Any) -> Any:
         wfn = original(name, **kwargs)
-        sol = getattr(wfn, "ddx", None)
-        if isinstance(sol, PCMSolver) and sol.settings.nonelectrostatic is not None:
+        sol: Any = getattr(wfn, "ddx", None)
+        if _nonelectrostatic(sol) is not None:
             if _post_scf(wfn):
                 energy = sol.terms.energy(_total_density(wfn)).total
                 _record_nonelectrostatic(wfn, energy, wfn.energy())

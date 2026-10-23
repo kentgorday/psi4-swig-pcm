@@ -243,9 +243,10 @@ A change to the recipe has to suit both:
   tautomator's environment.
 - **BLAS/LAPACK from the environment.** The recipe builds against the netlib variants of
   `libblas`/`liblapack`, as conda-forge's own builds do, so moist runs on whatever the
-  environment selects: Accelerate on osx-arm64; OpenBLAS here and MKL in tautomator on
+  environment selects: OpenBLAS here and in tautomator on osx-arm64, MKL in tautomator on
   linux-64. Built against the default OpenBLAS variants, it would link `libopenblas`, then
-  fail to import beside Accelerate or load a system OpenBLAS beside MKL.
+  fail to import, or load a system OpenBLAS, wherever the environment selects another
+  implementation (MKL, Accelerate).
   `tests/test_moist_build.py` checks the extension's links and the libraries it loads.
 - **Patches.** `patches/` adds an `#include <algorithm>` to moist's copy of FINUFFT that
   conda-forge's clang 23 (macOS) needs.

@@ -1,9 +1,7 @@
 [workspace]
 channels = ["conda-forge"]
 name = "psi4-swig-pcm"
-# The Accelerate BLAS selected below needs macOS 15.5 (as in tautomator).  A platform that
-# carries a virtual package needs a name of its own; [target.osx-arm64] still selects it.
-platforms = [{ name = "osx-arm64-macos-15-5", platform = "osx-arm64", macos = "15.5" }, "linux-64"]
+platforms = ["osx-arm64", "linux-64"]
 # Building this package (and depending on it from source, as tautomator does) uses pixi-build,
 # still a preview feature in pixi 0.82.
 preview = ["pixi-build"]
@@ -53,9 +51,10 @@ pytest = ">=9.0.3,<10"
 mypy = ">=1.20.0,<2"
 ruff = ">=0.11,<1"
 
-[target.osx-arm64.dependencies]
-# Apple's Accelerate instead of OpenBLAS, as in tautomator's psi4 environment.
-libblas = { version = "*", build = "*_newaccelerate" }
+# BLAS/LAPACK is conda-forge's default (OpenBLAS on both platforms), as in tautomator; not
+# Apple's Accelerate, whose dpotrf on the upper triangle (scipy's cholesky(lower=True), which
+# cavity.PCMOperator.diagnostics calls) reads and writes outside its matrix for orders of
+# about 1450-5500 on macOS 27.0.1, in both of its LAPACK interfaces (tautomator's README).
 
 [tasks]
 lint = "ruff check src/ tests/"

@@ -3,8 +3,8 @@
 """The moist package from packages/moist: its extension takes BLAS/LAPACK from the environment.
 
 Built against conda-forge's OpenBLAS variants of libblas/liblapack, the extension records
-libopenblas, which the environments that use it do not install (Accelerate on osx-arm64, MKL in
-tautomator on linux-64): it then fails to import, or loads an OpenBLAS from outside the
+libopenblas, which an environment on another implementation does not install (MKL in tautomator
+on linux-64, or Accelerate): it then fails to import, or loads an OpenBLAS from outside the
 environment (a system one).  Runs in the moist environment (pixi run -e moist test-moist).
 """
 

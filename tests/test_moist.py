@@ -321,3 +321,33 @@ def test_matches_moist_pyscf_host(cavity: str, component: str, name: str) -> Non
     G, wfn = psi4.gradient("hf", molecule=psi4_molecule(name), return_wfn=True)
     assert abs(wfn.energy() - e_ref) < 1e-10
     np.testing.assert_allclose(as_array(G), g_ref, atol=2e-8)  # UHF: PySCF converges to ~7e-9
+
+
+@pytest.mark.parametrize("component", ["cpcm", "iefpcm"])
+def test_apparent_charges_are_published(component: str) -> None:
+    """packages/moist's patch 0003: a PCM component publishes its apparent surface charges q.
+
+    For C-PCM they are the potential adjoint the host contracts (w_phi); for IEF-PCM w_phi is
+    the symmetrized adjoint and q differs from it, but either gives the energy, 1/2 q . phi.
+    """
+    psi4.set_options(HF_OPTIONS)
+    psi4_swig_pcm.enable(settings("svdw", component))
+    try:
+        _e, wfn = psi4.energy("hf", molecule=psi4_molecule("formate"), return_wfn=True)
+        sol = wfn.ddx
+        view = sol.model.components[0]
+        q = np.asarray(view.get("q"))
+        w_phi = sum(
+            np.asarray(i.w_phi)
+            for i in sol.response
+            if isinstance(i, moist.PotentialAdjointResponse)
+        )
+        phi = sol.nuc[0] + np.asarray(sol.charges.esp(sol.basis, sol.D))
+        assert 0.5 * q @ phi == pytest.approx(sol.energy, abs=1e-8)
+        if component == "cpcm":
+            np.testing.assert_array_equal(q, w_phi)
+        else:
+            np.testing.assert_allclose(np.asarray(view.get("qsym")), w_phi, rtol=0, atol=1e-14)
+            assert np.abs(q - w_phi).max() > 1e-6 * np.abs(q).max()
+    finally:
+        psi4_swig_pcm.disable()

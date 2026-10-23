@@ -334,8 +334,8 @@ class DropTerms:
         pos, d_pos = field_power(F, s.pos_exponent, 1)
         return s.neg_coeff * neg + s.pos_coeff * pos, s.neg_coeff * d_neg + s.pos_coeff * d_pos
 
-    def _field(self, surf: _Surface, D: FloatArray) -> tuple[FloatArray, FloatArray]:
-        """The solute's field at the points (n, 3), and the nuclei's dE/ds tensors."""
+    def _nuclear_field(self, surf: _Surface) -> tuple[FloatArray, FloatArray]:
+        """The nuclei's field at the points (n, 3), and their dE/ds tensors."""
         sep = surf.xyz[:, None] - self.centres[None]
         dist = np.linalg.norm(sep, axis=2)
         field = np.einsum("a,pax->px", self.charges, sep / dist[..., None] ** 3)
@@ -343,12 +343,18 @@ class DropTerms:
             np.eye(3)[None, None] / dist[..., None, None] ** 3
             - 3.0 * np.einsum("pax,pay->paxy", sep, sep) / dist[..., None, None] ** 5
         )
+        return field, tensor
+
+    def _field(self, surf: _Surface, D: FloatArray) -> FloatArray:
+        """The solute's whole field at the points (n, 3): one integral pass per direction,
+        which only the surface derivatives need (the energy needs n . E alone)."""
+        field, _tensor = self._nuclear_field(surf)
         n = len(surf.areas)
         for k in range(3):
             unit = np.zeros((n, 3))
             unit[:, k] = 1.0
             field[:, k] += _ne.normal_field(self.basis, surf.xyz, unit, D, self.nthreads)
-        return field, tensor
+        return field
 
     # -- one evaluation --------------------------------------------------------------------------
 
@@ -383,8 +389,14 @@ class DropTerms:
         V1, gb_v = self._gga(D, vol.coords, cv_rho, cv_grad, potential, gradient)
         V2, gb_r = self._gga(D, rays.coords, cr_rho, cr_grad, potential, gradient)
 
-        field, tensor = self._field(surf, D)
-        F = np.einsum("px,px->p", field, surf.normals)
+        nuclear, tensor = self._nuclear_field(surf)
+        if derivs:
+            field = self._field(surf, D)
+            F = np.einsum("px,px->p", field, surf.normals)
+        else:
+            F = np.einsum("px,px->p", nuclear, surf.normals) + _ne.normal_field(
+                self.basis, surf.xyz, surf.normals, D, self.nthreads
+            )
         f, f_prime = self._surface_function(F)
         energies = Energies(A * dispersion, B * exchange, float(surf.areas @ f))
         out = _Pass(energies)

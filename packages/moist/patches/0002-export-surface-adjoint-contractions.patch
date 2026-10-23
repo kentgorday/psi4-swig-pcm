@@ -81,10 +81,10 @@ index 6e9be9b..3cff8a8 100644
  /// Must call moist_compute_cavity_gradient first
  /// Uses cavity-internal ngrid and nsph for array extents
 diff --git a/python/moist/interface.py b/python/moist/interface.py
-index 2f87281..8db5611 100644
+index 2f87281..5ce128f 100644
 --- a/python/moist/interface.py
 +++ b/python/moist/interface.py
-@@ -1004,6 +1004,33 @@ class _CavityDROPBase(Cavity):
+@@ -1004,6 +1004,35 @@ class _CavityDROPBase(Cavity):
              self._handle, w_xi, w_f, w_xyz, w_normal, w_k1, w_k2
          )
  
@@ -106,7 +106,9 @@ index 2f87281..8db5611 100644
 +
 +        The density item moist's response phase would hand back for the same
 +        surface adjoints (``dS/drho`` folded in), or None on a cavity whose
-+        surface does not follow the density.
++        surface does not follow the density.  The channels are those of
++        :meth:`contract_surface_gradient` but ``w_c``: the volume origin has no
++        density route, and passing it raises.
 +        """
 +        self._require_updated()
 +        out = library.contract_cavity_surface_density(self._handle, **weights)
@@ -119,10 +121,10 @@ index 2f87281..8db5611 100644
      def nmax(self) -> int:
          return self.snapshot().nmax
 diff --git a/python/moist/library.py b/python/moist/library.py
-index c1be191..5bb0dea 100644
+index c1be191..e20eb28 100644
 --- a/python/moist/library.py
 +++ b/python/moist/library.py
-@@ -1378,6 +1378,75 @@ def contract_surface_lsf_weights(
+@@ -1378,6 +1378,80 @@ def contract_surface_lsf_weights(
      return w_lsf0, w_lsf1, w_lsf2
  
  
@@ -176,6 +178,11 @@ index c1be191..5bb0dea 100644
 +    Returns ``(w_rho, w_grad_rho, w_hess_rho)``, shapes (ngrid,), (ngrid, 3),
 +    (ngrid, 3, 3), or None for a surface that does not follow the density.
 +    """
++    if "w_c" in weights:
++        raise TypeError(
++            "w_c: the volume origin moves with the nuclei only and has no density route; "
++            "pass it to contract_cavity_surface_gradient"
++        )
 +    ngrid, _ = get_cavity_sizes(cavity)
 +    channels = _surface_channels(cavity, weights)
 +    w_rho = np.zeros(ngrid, dtype=np.float64)

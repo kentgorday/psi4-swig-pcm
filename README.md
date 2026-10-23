@@ -263,7 +263,11 @@ A change to the recipe has to suit both:
   host functional's surface adjoints (`moist_contract_cavity_surface_gradient` and
   `_density`, and the cavity methods `contract_surface_gradient` and
   `contract_surface_density`), which the nonelectrostatic correction's gradients need, here
-  and in tautomator; `tests/test_moist_build.py` checks them.
+  and in tautomator; `tests/test_moist_build.py` checks them.  `patches/0003` publishes a PCM
+  component's apparent surface charges `q` (and a layer component's symmetrized adjoint
+  `qsym`) as named results, `model.components[i].get("q")`: for IEF-PCM the potential adjoint
+  moist hands the host is `qsym`, not the apparent charge, so the nonelectrostatic
+  correction's charge-derived field reads `q` (`tests/test_moist.py`).
 
 `pixi run -e moist test-moist` builds and checks it here. tautomator's `pixi.lock` pins the
 commit it builds from; after a change here, `pixi update moist` there moves it.

@@ -39,7 +39,11 @@ FORMATE = np.array(
 )  # bohr
 
 # tautomator's pyscf_nonelectrostatic_drop on the same calculation: (total energy, (dispersion,
-# exchange, short range)) for the self-consistent and the post-SCF model
+# exchange, short range)) for the self-consistent and the post-SCF model.  Made on the cavity
+# _settings builds: moist's own default grid, nleb 194, with pruning level 4.  tautomator's
+# pyscf_moist.drop_cavity defaults to nleb 434 since then, so regenerating these from it needs
+# drop_cavity(name, nleb=194) (and IEF-PCM with PCMParameters(solver="DENSE"), the same
+# formate and HF/def2-SVP with exact integrals, and the same correction settings).
 PYSCF: dict[tuple[str, bool], tuple[float, tuple[float, float, float]]] = {
     ("svdw", True): (
         -188.238004715353,

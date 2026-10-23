@@ -156,7 +156,7 @@ class TestKernelAndGrids:
         t = np.sum(sep**2, axis=2) ** 1.5 / delta**3
         ref = (np.einsum("pix,ix->pi", sep, normals) * np.arctan(t) / t) @ areas / (3 * delta**6)
         weights = rng.normal(size=20)
-        J, dJ, dE_ds, dE_dA = _ne.dispersion_kernel(
+        J, dJ, dE_ds, dE_dA, dE_dn = _ne.dispersion_kernel(
             points, coords, normals, areas, delta, weights, 2
         )
         assert pytest.approx(ref, rel=1e-13) == J
@@ -168,8 +168,8 @@ class TestKernelAndGrids:
         Jm = _ne.dispersion_kernel(minus, coords, normals, areas, delta, None, 1)[0]
         assert dJ[4, 1] == pytest.approx((Jp[4] - Jm[4]) / (2 * h), rel=1e-7)
 
-        def energy(c: FloatArray, a: FloatArray) -> float:
-            return float(weights @ _ne.dispersion_kernel(points, c, normals, a, delta, None, 1)[0])
+        def energy(c: FloatArray, a: FloatArray, n: FloatArray = normals) -> float:
+            return float(weights @ _ne.dispersion_kernel(points, c, n, a, delta, None, 1)[0])
 
         cp, cm = coords.copy(), coords.copy()
         cp[7, 0] += h
@@ -182,6 +182,12 @@ class TestKernelAndGrids:
         am[2] -= h
         assert dE_dA[2] == pytest.approx(
             (energy(coords, ap) - energy(coords, am)) / (2 * h), rel=1e-9
+        )
+        npl, nmi = normals.copy(), normals.copy()  # a DROP surface's normals move
+        npl[11, 2] += h
+        nmi[11, 2] -= h
+        assert dE_dn[11, 2] == pytest.approx(
+            (energy(coords, areas, npl) - energy(coords, areas, nmi)) / (2 * h), rel=1e-7
         )
 
     @pytest.mark.parametrize("region", ["inside", "outside"])

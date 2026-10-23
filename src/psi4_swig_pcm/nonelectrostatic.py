@@ -45,6 +45,10 @@ VV_C = 0.0093  # gradient-correction constant of the VV10 local frequency
 # (Lebedev order, radial nodes per direction) of the inside and outside grids
 INSIDE_GRID: tuple[int, int] = (23, 12)
 OUTSIDE_GRID: tuple[int, int] = (41, 12)
+# On a moist DROP cavity: the all-space grid (Lebedev order, radial nodes, map length in bohr)
+# and the exterior rays (radial nodes, map length), tautomator's surface_quadrature rules
+VOLUME_RULE: tuple[int, int, float] = (23, 16, 1.5)
+RAY_RULE: tuple[int, float] = (12, 1.0)
 STEP_WIDTH = 2.0  # bohr; width of the partition's hand-over at a sphere's surface
 EXTERIOR_MAP = 0.5  # bohr; t = r_a + L (1 + x)/(1 - x) on the outside rays
 RHO_FLOOR = 1e-14  # densities at or below this are left out of the dispersion integrand
@@ -61,7 +65,9 @@ class NonelectrostaticSettings:
     self_consistent: add G to the SCF energy and V to the Fock matrix every iteration (the
     density relaxes with the correction), rather than evaluate G once on the converged PCM
     density (post-SCF, as CMIRS does).  solvent_rho: the liquid's mean electron density
-    (e/bohr^3).
+    (e/bohr^3).  inside_grid and outside_grid set the volume grids on the PCM's spheres;
+    volume_rule (Lebedev order, radial nodes, map length in bohr) and ray_rule (radial nodes, map
+    length) those on a moist DROP cavity (nonelectrostatic_drop).
     """
 
     dispersion: float
@@ -76,6 +82,8 @@ class NonelectrostaticSettings:
     vv_c: float = VV_C
     inside_grid: tuple[int, int] = INSIDE_GRID
     outside_grid: tuple[int, int] = OUTSIDE_GRID
+    volume_rule: tuple[int, int, float] = VOLUME_RULE
+    ray_rule: tuple[int, float] = RAY_RULE
 
 
 @dataclass(frozen=True)
@@ -457,7 +465,7 @@ class Terms:
             g_cavity += partition_gradient(grid, self.centres, self.radii, values, self.nthreads)
 
         s = self.settings
-        _J, dJ, dE_ds, dE_dA = (
+        _J, dJ, dE_ds, dE_dA, _dE_dn = (
             np.asarray(a)
             for a in _ne.dispersion_kernel(
                 self.inside.coords,

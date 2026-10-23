@@ -23,6 +23,9 @@
 // * The cavity grids' smooth partition of unity among the atoms and its derivative
 //   (tautomator's cavity_quadrature.py).
 //
+// * On MOIST's DROP cavities: the Stratmann-Scuseria-Frisch partition of space and the adjoint
+//   of the exterior rays (tautomator's surface_quadrature.py).
+//
 // Shell pairs M >= N only, D taken symmetric, as in gcharge.cpp.  Parallel over points.
 
 #include <pybind11/numpy.h>
@@ -30,6 +33,7 @@
 
 #include <libint2.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -329,8 +333,10 @@ namespace {
 
 constexpr double T_SERIES = 1e-2;
 
-// k * 3 delta^6 and grad_R k * 3 delta^6 for R = s - r and normal n.
-inline void kernel_pair(double rx, double ry, double rz, const double* nv, double d3, double& k, double* g) {
+// k * 3 delta^6, grad_R k * 3 delta^6 and arctan(t)/t for R = s - r and normal n
+// (grad_n k * 3 delta^6 = R arctan(t)/t).
+inline void kernel_pair(double rx, double ry, double rz, const double* nv, double d3, double& k, double* g,
+                        double& at) {
     const double r2 = rx * rx + ry * ry + rz * rz;
     const double t = r2 * std::sqrt(r2) / d3;
     const double t2 = t * t;
@@ -348,12 +354,14 @@ inline void kernel_pair(double rx, double ry, double rz, const double* nv, doubl
     g[0] = nv[0] * atan_t + sc * rx;
     g[1] = nv[1] * atan_t + sc * ry;
     g[2] = nv[2] * atan_t + sc * rz;
+    at = atan_t;
 }
 
 }  // namespace
 
 // J at each point, and if weights is given the derivatives of E = sum_p w_p J_p:
-// (J, dJ/dr (n,3), dE/ds (ns,3), dE/dA (ns,)).
+// (J, dJ/dr (n,3), dE/ds (ns,3), dE/dA (ns,), dE/dn (ns,3)).  On the PCM's spheres the normals
+// are fixed directions; on a DROP surface they move, and dE/dn carries that.
 py::tuple dispersion_kernel(Array points, Array coords, Array normals, Array areas, double delta, py::object weights,
                             int nthreads) {
     check_points(points, "points");
@@ -363,31 +371,37 @@ py::tuple dispersion_kernel(Array points, Array coords, Array normals, Array are
     const bool deriv = !weights.is_none();
     Array w = deriv ? weights.cast<Array>() : Array(0);
     if (deriv && w.shape(0) != np_) throw std::invalid_argument("weights must be (npoints,)");
-    py::array_t<double> J(np_), dJ({np_, static_cast<long>(3)}), dEs({ns, static_cast<long>(3)}), dEA(ns);
+    py::array_t<double> J(np_), dJ({np_, static_cast<long>(3)}), dEs({ns, static_cast<long>(3)}), dEA(ns),
+        dEn({ns, static_cast<long>(3)});
     const double *P = points.data(), *C = coords.data(), *Nv = normals.data(), *Ar = areas.data();
     const double* W = deriv ? w.data() : nullptr;
-    double *Jp = J.mutable_data(), *dJp = dJ.mutable_data(), *dEsp = dEs.mutable_data(), *dEAp = dEA.mutable_data();
+    double *Jp = J.mutable_data(), *dJp = dJ.mutable_data(), *dEsp = dEs.mutable_data(), *dEAp = dEA.mutable_data(),
+           *dEnp = dEn.mutable_data();
     {
         py::gil_scoped_release release;
         const double d3 = delta * delta * delta, scale = 1.0 / (3.0 * d3 * d3);
-        std::vector<std::vector<double>> acc(deriv ? nthreads : 0, std::vector<double>(4 * ns, 0.0));
+        std::vector<std::vector<double>> acc(deriv ? nthreads : 0, std::vector<double>(7 * ns, 0.0));
 #pragma omp parallel for schedule(static) num_threads(nthreads)
         for (long p = 0; p < np_; p++) {
             const double px = P[3 * p], py_ = P[3 * p + 1], pz = P[3 * p + 2];
-            double j = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, k, g[3];
+            double j = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, k, g[3], at;
             const double cp = deriv ? W[p] : 0.0;
             double* a = deriv ? acc[thread_rank()].data() : nullptr;
             for (long i = 0; i < ns; i++) {
-                kernel_pair(C[3 * i] - px, C[3 * i + 1] - py_, C[3 * i + 2] - pz, Nv + 3 * i, d3, k, g);
+                const double rx = C[3 * i] - px, ry = C[3 * i + 1] - py_, rz = C[3 * i + 2] - pz;
+                kernel_pair(rx, ry, rz, Nv + 3 * i, d3, k, g, at);
                 j += Ar[i] * k;
                 if (deriv) {
                     gx += Ar[i] * g[0];
                     gy += Ar[i] * g[1];
                     gz += Ar[i] * g[2];
-                    a[4 * i] += cp * Ar[i] * g[0];
-                    a[4 * i + 1] += cp * Ar[i] * g[1];
-                    a[4 * i + 2] += cp * Ar[i] * g[2];
-                    a[4 * i + 3] += cp * k;
+                    a[7 * i] += cp * Ar[i] * g[0];
+                    a[7 * i + 1] += cp * Ar[i] * g[1];
+                    a[7 * i + 2] += cp * Ar[i] * g[2];
+                    a[7 * i + 3] += cp * k;
+                    a[7 * i + 4] += cp * Ar[i] * rx * at;
+                    a[7 * i + 5] += cp * Ar[i] * ry * at;
+                    a[7 * i + 6] += cp * Ar[i] * rz * at;
                 }
             }
             Jp[p] = j * scale;
@@ -396,14 +410,17 @@ py::tuple dispersion_kernel(Array points, Array coords, Array normals, Array are
             dJp[3 * p + 2] = -gz * scale;
         }
         for (long i = 0; i < ns; i++) {
-            double v[4] = {0, 0, 0, 0};
+            double v[7] = {0, 0, 0, 0, 0, 0, 0};
             for (auto& t : acc)
-                for (int c = 0; c < 4; c++) v[c] += t[4 * i + c];
-            for (int c = 0; c < 3; c++) dEsp[3 * i + c] = v[c] * scale;
+                for (int c = 0; c < 7; c++) v[c] += t[7 * i + c];
+            for (int c = 0; c < 3; c++) {
+                dEsp[3 * i + c] = v[c] * scale;
+                dEnp[3 * i + c] = v[4 + c] * scale;
+            }
             dEAp[i] = v[3] * scale;
         }
     }
-    return py::make_tuple(J, dJ, dEs, dEA);
+    return py::make_tuple(J, dJ, dEs, dEA, dEn);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -617,6 +634,242 @@ py::array_t<double> cavity_partition_gradient(Array points, IntArray owners, Arr
     return out;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Volume integrals on a closed surface (MOIST's DROP cavities): the Stratmann-Scuseria-Frisch
+// partition of space among the atoms, and the adjoint of the exterior rays (tautomator's
+// surface_quadrature.py, which has the derivation)
+
+namespace {
+
+// s(mu) = (1 - g(mu/a))/2 and ds/dmu; g the SSF polynomial, +-1 beyond +-a.
+inline void ssf_s(double mu, double a, double& s, double& ds) {
+    const double x = mu / a;
+    if (x >= 1.0) {
+        s = 0.0;
+        ds = 0.0;
+        return;
+    }
+    if (x <= -1.0) {
+        s = 1.0;
+        ds = 0.0;
+        return;
+    }
+    const double x2 = x * x;
+    const double g = (35.0 * x - 35.0 * x * x2 + 21.0 * x * x2 * x2 - 5.0 * x * x2 * x2 * x2) / 16.0;
+    const double one = 1.0 - x2;
+    s = 0.5 * (1.0 - g);
+    ds = -0.5 * 35.0 * one * one * one / 16.0 / a;
+}
+
+std::vector<double> inverse_distances(const double* C, long m) {
+    std::vector<double> inv(m * m, 0.0);
+    for (long i = 0; i < m; i++)
+        for (long j = 0; j < m; j++)
+            if (i != j) {
+                const double dx = C[3 * i] - C[3 * j], dy = C[3 * i + 1] - C[3 * j + 1], dz = C[3 * i + 2] - C[3 * j + 2];
+                inv[i * m + j] = 1.0 / std::sqrt(dx * dx + dy * dy + dz * dz);
+            }
+    return inv;
+}
+
+// Unnormalized cell factors P_C(y) of every atom, and their sum; d gets |y - c_C|.
+double cells(const double* y, const double* C, const double* inv, long m, double a, double* d, double* P) {
+    for (long c = 0; c < m; c++) {
+        const double dx = y[0] - C[3 * c], dy = y[1] - C[3 * c + 1], dz = y[2] - C[3 * c + 2];
+        d[c] = std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    double z = 0.0;
+    for (long c = 0; c < m; c++) {
+        double prod = 1.0, s, ds;
+        for (long b = 0; b < m && prod != 0.0; b++) {
+            if (b == c) continue;
+            ssf_s((d[c] - d[b]) * inv[c * m + b], a, s, ds);
+            prod *= s;
+        }
+        P[c] = prod;
+        z += prod;
+    }
+    return z;
+}
+
+}  // namespace
+
+// p_owner(y) at each point.
+py::array_t<double> ssf_weights(Array points, IntArray owners, Array centres, double a, int nthreads) {
+    check_points(points, "points");
+    check_points(centres, "centres");
+    const long n = points.shape(0), m = centres.shape(0);
+    if (owners.shape(0) != n) throw std::invalid_argument("owners must be (npoints,)");
+    py::array_t<double> out(n);
+    const double *Y = points.data(), *C = centres.data();
+    const std::int64_t* own = owners.data();
+    double* O = out.mutable_data();
+    {
+        py::gil_scoped_release release;
+        const std::vector<double> inv = inverse_distances(C, m);
+#pragma omp parallel num_threads(nthreads)
+        {
+            std::vector<double> d(m), P(m);
+#pragma omp for schedule(static)
+            for (long p = 0; p < n; p++) {
+                const double z = cells(Y + 3 * p, C, inv.data(), m, a, d.data(), P.data());
+                O[p] = z > 0.0 ? P[own[p]] / z : 0.0;
+            }
+        }
+    }
+    return out;
+}
+
+// For E = sum_p coeff_p p_owner(p)(y_p): (dE/dR at fixed points (natm, 3), dE/dy (n, 3)).
+py::tuple ssf_gradient(Array points, IntArray owners, Array centres, double a, Array coeff, int nthreads) {
+    check_points(points, "points");
+    check_points(centres, "centres");
+    const long n = points.shape(0), m = centres.shape(0);
+    if (owners.shape(0) != n || coeff.shape(0) != n)
+        throw std::invalid_argument("owners and coeff must be (npoints,)");
+    py::array_t<double> gR({m, static_cast<long>(3)}), gy({n, static_cast<long>(3)});
+    const double *Y = points.data(), *C = centres.data(), *W = coeff.data();
+    const std::int64_t* own = owners.data();
+    double *GR = gR.mutable_data(), *GY = gy.mutable_data();
+    {
+        py::gil_scoped_release release;
+        const std::vector<double> inv = inverse_distances(C, m);
+        std::vector<std::vector<double>> acc(nthreads, std::vector<double>(3 * m, 0.0));
+        std::fill(GY, GY + 3 * n, 0.0);
+#pragma omp parallel num_threads(nthreads)
+        {
+            std::vector<double> d(m), P(m), e(3 * m);
+            double* g = acc[thread_rank()].data();
+#pragma omp for schedule(static)
+            for (long p = 0; p < n; p++) {
+                if (W[p] == 0.0) continue;
+                const double* y = Y + 3 * p;
+                const double z = cells(y, C, inv.data(), m, a, d.data(), P.data());
+                if (z <= 0.0) continue;
+                const long A = own[p];
+                const double pA = P[A] / z;
+                for (long c = 0; c < m; c++)
+                    for (int k = 0; k < 3; k++) e[3 * c + k] = d[c] > 0.0 ? (y[k] - C[3 * c + k]) / d[c] : 0.0;
+                for (long c = 0; c < m; c++) {
+                    if (P[c] == 0.0) continue;
+                    const double wc = W[p] * ((c == A ? 1.0 : 0.0) - pA) / z * P[c];
+                    if (wc == 0.0) continue;
+                    for (long b = 0; b < m; b++) {
+                        if (b == c) continue;
+                        const double ir = inv[c * m + b], mu = (d[c] - d[b]) * ir;
+                        double s, ds;
+                        ssf_s(mu, a, s, ds);
+                        if (ds == 0.0) continue;
+                        const double f = wc * ds / s;
+                        for (int k = 0; k < 3; k++) {
+                            const double sep = (C[3 * c + k] - C[3 * b + k]) * ir * ir;
+                            GY[3 * p + k] += f * (e[3 * c + k] - e[3 * b + k]) * ir;
+                            g[3 * c + k] += f * (-e[3 * c + k] * ir - mu * sep);
+                            g[3 * b + k] += f * (e[3 * b + k] * ir + mu * sep);
+                        }
+                    }
+                }
+            }
+        }
+        for (long k = 0; k < 3 * m; k++) {
+            double v = 0.0;
+            for (auto& t : acc) v += t[k];
+            GR[k] = v;
+        }
+    }
+    return py::make_tuple(gR, gy);
+}
+
+// Whether each atom's cell holds each point (P_A(y) > 0, unnormalized): (npoints, natm).
+py::array_t<bool> ssf_cells_hold(Array points, Array centres, double a, int nthreads) {
+    check_points(points, "points");
+    check_points(centres, "centres");
+    const long n = points.shape(0), m = centres.shape(0);
+    py::array_t<bool> out({n, m});
+    const double *Y = points.data(), *C = centres.data();
+    bool* O = out.mutable_data();
+    {
+        py::gil_scoped_release release;
+        const std::vector<double> inv = inverse_distances(C, m);
+#pragma omp parallel num_threads(nthreads)
+        {
+            std::vector<double> d(m), P(m);
+#pragma omp for schedule(static)
+            for (long p = 0; p < n; p++) {
+                cells(Y + 3 * p, C, inv.data(), m, a, d.data(), P.data());
+                for (long c = 0; c < m; c++) O[p * m + c] = P[c] > 0.0;
+            }
+        }
+    }
+    return out;
+}
+
+// The exterior rays' adjoint: dE/dy (gy, the partition's and the integrand's) and the base
+// weight b = a (n.e) (1 + tau/r)^2 w_k carried back through y = s_i + tau e to the surface
+// points, normals and areas and to each ray's origin: (ds, dn, da, dc).
+py::tuple ray_adjoint(Array xyz, Array normals, Array areas, Array centres, IntArray point, IntArray atom, Array tau,
+                      Array w_radial, Array partition, Array values, Array gy, int nthreads) {
+    check_points(xyz, "xyz");
+    check_points(normals, "normals");
+    check_points(centres, "centres");
+    check_points(gy, "gy");
+    const long ns = xyz.shape(0), m = centres.shape(0), n = point.shape(0);
+    for (auto len : {atom.shape(0), tau.shape(0), w_radial.shape(0), partition.shape(0), values.shape(0), gy.shape(0)})
+        if (len != n) throw std::invalid_argument("every node array must have one entry per node");
+    py::array_t<double> ds({ns, static_cast<long>(3)}), dn({ns, static_cast<long>(3)}), da(ns),
+        dc({m, static_cast<long>(3)});
+    const double *X = xyz.data(), *Nv = normals.data(), *Ar = areas.data(), *C = centres.data(), *T = tau.data(),
+                 *Wr = w_radial.data(), *Pt = partition.data(), *V = values.data(), *G = gy.data();
+    const std::int64_t *I = point.data(), *At = atom.data();
+    double *DS = ds.mutable_data(), *DN = dn.mutable_data(), *DA = da.mutable_data(), *DC = dc.mutable_data();
+    {
+        py::gil_scoped_release release;
+        std::vector<std::vector<double>> acc(nthreads, std::vector<double>(7 * ns + 3 * m, 0.0));
+#pragma omp parallel num_threads(nthreads)
+        {
+            double* q = acc[thread_rank()].data();
+#pragma omp for schedule(static)
+            for (long k = 0; k < n; k++) {
+                const long i = I[k], A = At[k];
+                const double R[3] = {X[3 * i] - C[3 * A], X[3 * i + 1] - C[3 * A + 1], X[3 * i + 2] - C[3 * A + 2]};
+                const double r = std::sqrt(R[0] * R[0] + R[1] * R[1] + R[2] * R[2]);
+                const double e[3] = {R[0] / r, R[1] / r, R[2] / r};
+                const double* nv = Nv + 3 * i;
+                const double ne = nv[0] * e[0] + nv[1] * e[1] + nv[2] * e[2];
+                const double t = T[k], s = 1.0 + t / r, w = Wr[k], a = Ar[i];
+                const double Gp = V[k] * Pt[k];  // dE/db
+                q[7 * i + 6] += Gp * ne * s * s * w;
+                const double c1 = a * w * s * s / r, c2 = a * w * (s * s * ne / r + 2.0 * ne * s * t / (r * r));
+                const double* g = G + 3 * k;
+                const double ge = g[0] * e[0] + g[1] * e[1] + g[2] * e[2], f = t / r;
+                for (int x = 0; x < 3; x++) {
+                    q[7 * i + 3 + x] += Gp * a * e[x] * s * s * w;
+                    const double db = c1 * nv[x] - c2 * e[x];
+                    const double pr = f * (g[x] - ge * e[x]);
+                    q[7 * i + x] += g[x] + pr + Gp * db;
+                    q[7 * ns + 3 * A + x] += -pr - Gp * db;
+                }
+            }
+        }
+        for (long i = 0; i < ns; i++) {
+            double v[7] = {0, 0, 0, 0, 0, 0, 0};
+            for (auto& t : acc)
+                for (int c = 0; c < 7; c++) v[c] += t[7 * i + c];
+            for (int x = 0; x < 3; x++) {
+                DS[3 * i + x] = v[x];
+                DN[3 * i + x] = v[3 + x];
+            }
+            DA[i] = v[6];
+        }
+        for (long k = 0; k < 3 * m; k++) {
+            double v = 0.0;
+            for (auto& t : acc) v += t[7 * ns + k];
+            DC[k] = v;
+        }
+    }
+    return py::make_tuple(ds, dn, da, dc);
+}
+
 }  // namespace nonelectrostatic
 }  // namespace psi
 
@@ -638,4 +891,13 @@ PYBIND11_MODULE(_nonelectrostatic, m) {
     m.def("cavity_partition_gradient", &ne::cavity_partition_gradient, py::arg("points"), py::arg("owners"),
           py::arg("centres"), py::arg("radii"), py::arg("dist"), py::arg("inside"), py::arg("width"),
           py::arg("values"), py::arg("nthreads"));
+    m.def("ssf_weights", &ne::ssf_weights, py::arg("points"), py::arg("owners"), py::arg("centres"), py::arg("a"),
+          py::arg("nthreads"));
+    m.def("ssf_gradient", &ne::ssf_gradient, py::arg("points"), py::arg("owners"), py::arg("centres"),
+          py::arg("a"), py::arg("coeff"), py::arg("nthreads"));
+    m.def("ssf_cells_hold", &ne::ssf_cells_hold, py::arg("points"), py::arg("centres"), py::arg("a"),
+          py::arg("nthreads"));
+    m.def("ray_adjoint", &ne::ray_adjoint, py::arg("xyz"), py::arg("normals"), py::arg("areas"), py::arg("centres"),
+          py::arg("point"), py::arg("atom"), py::arg("tau"), py::arg("w_radial"), py::arg("partition"),
+          py::arg("values"), py::arg("gy"), py::arg("nthreads"));
 }

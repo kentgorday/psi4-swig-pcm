@@ -38,8 +38,8 @@ def dispersion_kernel(
     delta: float,
     weights: FloatArray | None = None,
     nthreads: int = 1,
-) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
-    """(J, dJ/dr, dE/ds, dE/dA) for E = sum_p weights_p J(r_p)."""
+) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray]:
+    """(J, dJ/dr, dE/ds, dE/dA, dE/dn) for E = sum_p weights_p J(r_p)."""
 
 def cavity_partition(
     points: FloatArray,
@@ -65,3 +65,39 @@ def cavity_partition_gradient(
     nthreads: int,
 ) -> FloatArray:
     """sum_p values_p dP_owner(p)(r_p)/dR, the points moving with their owners: (natm, 3)."""
+
+def ssf_weights(
+    points: FloatArray, owners: IntArray, centres: FloatArray, a: float, nthreads: int
+) -> FloatArray:
+    """p_owner(y) of the Stratmann-Scuseria-Frisch partition at each point."""
+
+def ssf_gradient(
+    points: FloatArray,
+    owners: IntArray,
+    centres: FloatArray,
+    a: float,
+    coeff: FloatArray,
+    nthreads: int,
+) -> tuple[FloatArray, FloatArray]:
+    """For sum_p coeff_p p_owner(y_p): (d/dR at fixed points (natm, 3), d/dy (n, 3))."""
+
+def ssf_cells_hold(
+    points: FloatArray, centres: FloatArray, a: float, nthreads: int
+) -> NDArray[np.bool_]:
+    """(npoints, natm): whether each atom's cell holds each point."""
+
+def ray_adjoint(
+    xyz: FloatArray,
+    normals: FloatArray,
+    areas: FloatArray,
+    centres: FloatArray,
+    point: IntArray,
+    atom: IntArray,
+    tau: FloatArray,
+    w_radial: FloatArray,
+    partition: FloatArray,
+    values: FloatArray,
+    gy: FloatArray,
+    nthreads: int,
+) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
+    """The exterior rays' (ds, dn, da, dc) for dE/dy = gy and integrand values."""

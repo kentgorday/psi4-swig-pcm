@@ -67,11 +67,11 @@ requirements:
     - cffi
     - setuptools
     # The generic BLAS/LAPACK interfaces (-llapack -lblas), so moist uses whichever
-    # implementation the environment selects, as Psi4, PySCF and numpy do: Accelerate on
-    # osx-arm64; OpenBLAS here and MKL in tautomator on linux-64.  Built against the netlib
+    # implementation the environment selects, as Psi4, PySCF and numpy do: OpenBLAS here and
+    # in tautomator on osx-arm64, MKL in tautomator on linux-64.  Built against the netlib
     # variants, as conda-forge's own pinning does: in the OpenBLAS variants liblapack and
     # libblas are links to libopenblas, so the extension would record libopenblas, and fail
-    # to load beside Accelerate or pick up a system OpenBLAS beside MKL.
+    # to load, or pick up a system OpenBLAS, beside another implementation (MKL, Accelerate).
     # tests/test_moist_build.py checks both.
     - libblas * *netlib
     - liblapack * *netlib

@@ -1,0 +1,414 @@
+Export the reverse contraction of a host functional's surface adjoints.
+
+moist's models hand their components' surface adjoints (dE/d position, normal,
+area, width, switching factor, curvature) to the cavity, whose reverse pass
+turns them into the nuclear gradient (get_surface_gradient) and, on a
+density-backed level set, into density weights (get_surface_response).  Only
+the field route of the electronic half was public
+(moist_contract_surface_lsf_weights, without the area and integration-weight
+channels).  This exports both, for an energy the host computes itself on the
+surface (tautomator's and psi4-swig-pcm's nonelectrostatic terms):
+
+  moist_contract_cavity_surface_gradient  every channel -> dE/dR
+  moist_contract_cavity_surface_density   every channel -> (w_rho, w_grad_rho,
+                                          w_hess_rho), dS/drho folded in
+
+with Python wrappers (library.contract_cavity_surface_gradient/_density) and
+DROP cavity methods (contract_surface_gradient/_density).  Nothing existing
+changes.
+
+diff --git a/include/moist.h b/include/moist.h
+index 6e9be9b..3cff8a8 100644
+--- a/include/moist.h
++++ b/include/moist.h
+@@ -1604,6 +1604,58 @@ moist_contract_surface_lsf_weights_extended(
+                                    const double* w_k1 /* [ngrid] or NULL */,
+                                    const double* w_k2 /* [ngrid] or NULL */) moist_API_SUFFIX__V_1_0;
+ 
++/// Contract a host functional's surface adjoints into the nuclear gradient (DROP)
++/// The reverse pass moist's own models run on their components' adjoints: the
++/// level-set field, anchor and switching routes, and the volume origin, for an
++/// energy E_host whose surface adjoints are the w_* (dE_host/d observable).
++/// Every channel is optional (NULL leaves it at zero):
++///   w_xi, w_f, w_k1, w_k2, w_a, w_w [ngrid] - widths, switching factors,
++///                                    curvatures, areas, integration weights
++///   w_xyz, w_n  row-major (ngrid, 3)  - point positions, outward normals
++///   w_c[3]                           - volume origin
++/// gradient    row-major (nsph, 3), overwritten with dE_host/dR.
++/// A density-backed level set has no nuclear partials of its own: its field
++/// route is the host's, from moist_contract_cavity_surface_density
++moist_API_ENTRY void moist_API_CALL
++moist_contract_cavity_surface_gradient(moist_error error,
++                                       moist_cavity cavity,
++                                       const double* w_xi /* [ngrid] or NULL */,
++                                       const double* w_f /* [ngrid] or NULL */,
++                                       const double* w_xyz /* : row-major (ngrid, 3), or NULL */,
++                                       const double* w_n /* : row-major (ngrid, 3), or NULL */,
++                                       const double* w_k1 /* [ngrid] or NULL */,
++                                       const double* w_k2 /* [ngrid] or NULL */,
++                                       const double* w_a /* [ngrid] or NULL */,
++                                       const double* w_w /* [ngrid] or NULL */,
++                                       const double* w_c /* [3] or NULL */,
++                                       double* gradient /* : row-major (nsph, 3) */) moist_API_SUFFIX__V_1_0;
++
++/// Contract a host functional's surface adjoints into density weights (DROP)
++/// The electronic counterpart of moist_contract_cavity_surface_gradient: the
++/// weights of a density item, conjugate to rho, grad rho and its Hessian on
++/// the grid with the level set's dS/drho folded in, as the response phase
++/// hands back for moist's own components. The channels are those of
++/// moist_contract_cavity_surface_gradient, without the volume origin.
++/// A surface that does not follow the density writes zeros and sets
++/// *dependent = 0; otherwise *dependent = 1.
++///   w_rho[ngrid], w_grad_rho row-major (ngrid, 3), w_hess_rho row-major
++///   (ngrid, 3, 3), with w_hess_rho[i][b][a] conjugate to the native (a,b,i)
++moist_API_ENTRY void moist_API_CALL
++moist_contract_cavity_surface_density(moist_error error,
++                                      moist_cavity cavity,
++                                      const double* w_xi /* [ngrid] or NULL */,
++                                      const double* w_f /* [ngrid] or NULL */,
++                                      const double* w_xyz /* : row-major (ngrid, 3), or NULL */,
++                                      const double* w_n /* : row-major (ngrid, 3), or NULL */,
++                                      const double* w_k1 /* [ngrid] or NULL */,
++                                      const double* w_k2 /* [ngrid] or NULL */,
++                                      const double* w_a /* [ngrid] or NULL */,
++                                      const double* w_w /* [ngrid] or NULL */,
++                                      double* w_rho /* [ngrid] */,
++                                      double* w_grad_rho /* : row-major (ngrid, 3) */,
++                                      double* w_hess_rho /* : row-major (ngrid, 3, 3) */,
++                                      int* dependent) moist_API_SUFFIX__V_1_0;
++
+ /// Contract direct nuclear and electronic PCM terms
+ /// Must call moist_compute_cavity_gradient first
+ /// Uses cavity-internal ngrid and nsph for array extents
+diff --git a/python/moist/interface.py b/python/moist/interface.py
+index 2f87281..8db5611 100644
+--- a/python/moist/interface.py
++++ b/python/moist/interface.py
+@@ -1004,6 +1004,33 @@ class _CavityDROPBase(Cavity):
+             self._handle, w_xi, w_f, w_xyz, w_normal, w_k1, w_k2
+         )
+ 
++    def contract_surface_gradient(self, **weights) -> np.ndarray:
++        """Nuclear gradient (nsph, 3) of a host functional from its surface adjoints.
++
++        The reverse pass moist runs for its own components: ``weights`` are the
++        derivatives of the functional with respect to the surface observables
++        (``w_xyz``, ``w_n``, ``w_a``, ``w_xi``, ``w_f``, ``w_w``, ``w_k1``,
++        ``w_k2``, ``w_c``; each optional).  On a density-backed cavity the
++        field route is the host's: :meth:`contract_surface_density` gives its
++        weights.
++        """
++        self._require_updated()
++        return library.contract_cavity_surface_gradient(self._handle, **weights)
++
++    def contract_surface_density(self, **weights) -> Optional[DensityResponse]:
++        """Density weights of a host functional from its surface adjoints.
++
++        The density item moist's response phase would hand back for the same
++        surface adjoints (``dS/drho`` folded in), or None on a cavity whose
++        surface does not follow the density.
++        """
++        self._require_updated()
++        out = library.contract_cavity_surface_density(self._handle, **weights)
++        if out is None:
++            return None
++        w_rho, w_grad_rho, w_hess_rho = out
++        return DensityResponse(w_rho=w_rho, w_grad_rho=w_grad_rho, w_hess_rho=w_hess_rho)
++
+     @property
+     def nmax(self) -> int:
+         return self.snapshot().nmax
+diff --git a/python/moist/library.py b/python/moist/library.py
+index c1be191..5bb0dea 100644
+--- a/python/moist/library.py
++++ b/python/moist/library.py
+@@ -1378,6 +1378,75 @@ def contract_surface_lsf_weights(
+     return w_lsf0, w_lsf1, w_lsf2
+ 
+ 
++_SURFACE_CHANNELS = ("w_xi", "w_f", "w_xyz", "w_n", "w_k1", "w_k2", "w_a", "w_w")
++
++
++def _surface_channels(cavity: CavityHandle, weights: dict) -> list:
++    """The surface adjoint channels in API order, as contiguous arrays or None."""
++    ngrid, _ = get_cavity_sizes(cavity)
++    unknown = set(weights) - set(_SURFACE_CHANNELS) - {"w_c"}
++    if unknown:
++        raise TypeError(f"unknown surface channels: {sorted(unknown)}")
++    out = []
++    for name in _SURFACE_CHANNELS:
++        value = weights.get(name)
++        if value is not None:
++            value = np.ascontiguousarray(value, dtype=np.float64)
++            shape = (ngrid, 3) if name in ("w_xyz", "w_n") else (ngrid,)
++            if value.shape != shape:
++                raise ValueError(f"{name} must have shape {shape}, not {value.shape}")
++        out.append(value)
++    return out
++
++
++def contract_cavity_surface_gradient(cavity: CavityHandle, **weights) -> np.ndarray:
++    """Contract a host functional's surface adjoints into its nuclear gradient (nsph, 3).
++
++    Keyword channels (each optional): ``w_xi``, ``w_f``, ``w_k1``, ``w_k2``,
++    ``w_a``, ``w_w`` (ngrid,); ``w_xyz``, ``w_n`` (ngrid, 3); ``w_c`` (3,).
++    """
++    _, nsph = get_cavity_sizes(cavity)
++    channels = _surface_channels(cavity, weights)
++    w_c = weights.get("w_c")
++    if w_c is not None:
++        w_c = np.ascontiguousarray(w_c, dtype=np.float64)
++        if w_c.shape != (3,):
++            raise ValueError("w_c must have shape (3,)")
++    gradient = np.zeros((nsph, 3), dtype=np.float64)
++    error_check(lib.moist_contract_cavity_surface_gradient)(
++        cavity.handle,
++        *(_cast("double*", c) for c in channels),
++        _cast("double*", w_c),
++        _cast("double*", gradient),
++    )
++    return gradient
++
++
++def contract_cavity_surface_density(cavity: CavityHandle, **weights):
++    """Contract a host functional's surface adjoints into density weights.
++
++    Returns ``(w_rho, w_grad_rho, w_hess_rho)``, shapes (ngrid,), (ngrid, 3),
++    (ngrid, 3, 3), or None for a surface that does not follow the density.
++    """
++    ngrid, _ = get_cavity_sizes(cavity)
++    channels = _surface_channels(cavity, weights)
++    w_rho = np.zeros(ngrid, dtype=np.float64)
++    w_grad_rho = np.zeros((ngrid, 3), dtype=np.float64)
++    w_hess_rho = np.zeros((ngrid, 3, 3), dtype=np.float64)
++    dependent = ffi.new("int *")
++    error_check(lib.moist_contract_cavity_surface_density)(
++        cavity.handle,
++        *(_cast("double*", c) for c in channels),
++        _cast("double*", w_rho),
++        _cast("double*", w_grad_rho),
++        _cast("double*", w_hess_rho),
++        dependent,
++    )
++    if not dependent[0]:
++        return None
++    return w_rho, w_grad_rho, w_hess_rho
++
++
+ def _char(value: Optional[str]):
+     return ffi.new("char[]", value.encode()) if value is not None else ffi.NULL
+ 
+diff --git a/src/moist/api.f90 b/src/moist/api.f90
+index f4ac785..c02006c 100644
+--- a/src/moist/api.f90
++++ b/src/moist/api.f90
+@@ -437,6 +437,7 @@ module moist_api
+    public :: get_anchor_gradient_api
+    public :: get_cavity_gradient_api
+    public :: contract_surface_lsf_weights_api, contract_surface_lsf_weights_extended_api
++   public :: contract_cavity_surface_gradient_api, contract_cavity_surface_density_api
+    public :: contract_pcm_nuclear_gradient_api
+ 
+ contains
+@@ -6953,6 +6954,201 @@ contains
+ 
+    end subroutine contract_surface_lsf_weights_extended_api
+ 
++   !> Copy host surface adjoints into an accumulator; a NULL channel stays zero
++   !>
++   !> @param[out] acc   Accumulator for ngrid points
++   !> @param[in]  ngrid Number of surface grid points
++   subroutine fill_host_surface_adjoint(acc, ngrid, c_w_xi, c_w_f, c_w_xyz, c_w_n, &
++         & c_w_k1, c_w_k2, c_w_a, c_w_w, c_w_c)
++      !> Accumulator
++      type(cavity_surface_adjoint_type), intent(out) :: acc
++      !> Number of surface grid points
++      integer, intent(in) :: ngrid
++      !> Channels: (ngrid), (ngrid), C (ngrid,3), C (ngrid,3), (ngrid) x4, (3); or NULL
++      type(c_ptr), intent(in) :: c_w_xi, c_w_f, c_w_xyz, c_w_n, c_w_k1, c_w_k2, c_w_a, c_w_w, c_w_c
++      real(c_double), pointer :: v1(:), v2(:, :)
++
++      call acc%init(ngrid)
++      if (c_associated(c_w_xi)) then
++         call c_f_pointer(c_w_xi, v1, [ngrid])
++         acc%w_xi = v1
++      end if
++      if (c_associated(c_w_f)) then
++         call c_f_pointer(c_w_f, v1, [ngrid])
++         acc%w_f = v1
++      end if
++      if (c_associated(c_w_xyz)) then
++         call c_f_pointer(c_w_xyz, v2, [3, ngrid])
++         acc%w_xyz = v2
++      end if
++      if (c_associated(c_w_n)) then
++         call c_f_pointer(c_w_n, v2, [3, ngrid])
++         acc%w_n = v2
++      end if
++      if (c_associated(c_w_k1)) then
++         call c_f_pointer(c_w_k1, v1, [ngrid])
++         acc%w_k1 = v1
++      end if
++      if (c_associated(c_w_k2)) then
++         call c_f_pointer(c_w_k2, v1, [ngrid])
++         acc%w_k2 = v1
++      end if
++      if (c_associated(c_w_a)) then
++         call c_f_pointer(c_w_a, v1, [ngrid])
++         acc%w_a = v1
++      end if
++      if (c_associated(c_w_w)) then
++         call c_f_pointer(c_w_w, v1, [ngrid])
++         acc%w_w = v1
++      end if
++      if (c_associated(c_w_c)) then
++         call c_f_pointer(c_w_c, v1, [3])
++         acc%w_c = v1
++      end if
++
++   end subroutine fill_host_surface_adjoint
++
++   !> Contract a host functional's surface adjoints into the nuclear gradient
++   !>
++   !> - the reverse pass moist's own models run on their components' adjoints
++   !>   (`get_surface_gradient`): the level-set field, anchor and switching
++   !>   routes, and the volume origin
++   !> - every channel is optional; NULL leaves it at zero
++   !> - a density-backed level set has no nuclear partials of its own: the
++   !>   host adds its field route from the density weights of
++   !>   moist_contract_cavity_surface_density against its own d rho/dR
++   subroutine contract_cavity_surface_gradient_api(verror, vcav, c_w_xi, c_w_f, c_w_xyz, &
++         & c_w_n, c_w_k1, c_w_k2, c_w_a, c_w_w, c_w_c, c_gradient) &
++         & bind(C, name=namespace//"contract_cavity_surface_gradient")
++      !> Diagnostic handle
++      type(c_ptr), value :: verror
++      type(vp_error), pointer :: error
++      !> Cavity handle
++      type(c_ptr), value :: vcav
++      type(vp_cavity), pointer :: cav
++      !> Surface adjoint channels, or NULL
++      type(c_ptr), value :: c_w_xi, c_w_f, c_w_xyz, c_w_n, c_w_k1, c_w_k2, c_w_a, c_w_w, c_w_c
++      !> Output nuclear gradient, C shape (nsph,3), overwritten
++      type(c_ptr), value :: c_gradient
++      real(c_double), pointer :: gradient(:, :)
++      type(cavity_surface_adjoint_type) :: acc
++      type(error_type), allocatable :: cavity_error
++
++      if (.not. c_associated(verror)) return
++      call c_f_pointer(verror, error)
++      if (allocated(error%ptr)) deallocate (error%ptr)
++      if (.not. c_associated(vcav)) then
++         call api_error(error%ptr, "contract_cavity_surface_gradient", "Cavity handle is missing")
++         return
++      end if
++      call c_f_pointer(vcav, cav)
++      if (.not. associated(cav%ptr)) then
++         call api_error(error%ptr, "contract_cavity_surface_gradient", "Cavity is not initialized")
++         return
++      end if
++      if (.not. c_associated(c_gradient)) then
++         call api_error(error%ptr, "contract_cavity_surface_gradient", "Null gradient pointer provided")
++         return
++      end if
++
++      call c_f_pointer(c_gradient, gradient, [3, cav%ptr%nsph])
++      call fill_host_surface_adjoint(acc, cav%ptr%ngrid, c_w_xi, c_w_f, c_w_xyz, c_w_n, &
++         & c_w_k1, c_w_k2, c_w_a, c_w_w, c_w_c)
++      gradient = 0.0_wp
++      call cav%ptr%get_surface_gradient(acc, gradient, cavity_error)
++      if (allocated(cavity_error)) then
++         call api_error(error%ptr, "contract_cavity_surface_gradient", cavity_error%message)
++         return
++      end if
++
++   end subroutine contract_cavity_surface_gradient_api
++
++   !> Contract a host functional's surface adjoints into density weights
++   !>
++   !> - the electronic counterpart of moist_contract_cavity_surface_gradient:
++   !>   the weights a density-backed cavity's response item carries
++   !>   (`get_surface_response`), conjugate to rho, grad rho and its Hessian on
++   !>   the grid, with the level set's dS/drho folded in
++   !> - a cavity whose surface does not follow the density writes zeros and
++   !>   reports dependent = 0
++   subroutine contract_cavity_surface_density_api(verror, vcav, c_w_xi, c_w_f, c_w_xyz, &
++         & c_w_n, c_w_k1, c_w_k2, c_w_a, c_w_w, c_w_rho, c_w_grad_rho, c_w_hess_rho, &
++         & dependent) bind(C, name=namespace//"contract_cavity_surface_density")
++      !> Diagnostic handle
++      type(c_ptr), value :: verror
++      type(vp_error), pointer :: error
++      !> Cavity handle
++      type(c_ptr), value :: vcav
++      type(vp_cavity), pointer :: cav
++      !> Surface adjoint channels, or NULL
++      type(c_ptr), value :: c_w_xi, c_w_f, c_w_xyz, c_w_n, c_w_k1, c_w_k2, c_w_a, c_w_w
++      !> Output density weights, C shapes (ngrid), (ngrid,3), (ngrid,3,3)
++      type(c_ptr), value :: c_w_rho, c_w_grad_rho, c_w_hess_rho
++      !> Whether the surface follows the density (1) or not (0)
++      integer(c_int), intent(out) :: dependent
++      real(c_double), pointer :: w_rho(:), w_grad_rho(:, :), w_hess_rho(:, :, :)
++      type(cavity_surface_adjoint_type) :: acc
++      type(error_type), allocatable :: cavity_error
++      real(wp) :: factor
++      integer :: ngrid
++
++      dependent = 0
++      if (.not. c_associated(verror)) return
++      call c_f_pointer(verror, error)
++      if (allocated(error%ptr)) deallocate (error%ptr)
++      if (.not. c_associated(vcav)) then
++         call api_error(error%ptr, "contract_cavity_surface_density", "Cavity handle is missing")
++         return
++      end if
++      call c_f_pointer(vcav, cav)
++      if (.not. associated(cav%ptr)) then
++         call api_error(error%ptr, "contract_cavity_surface_density", "Cavity is not initialized")
++         return
++      end if
++      if (.not. c_associated(c_w_rho) .or. .not. c_associated(c_w_grad_rho) &
++          .or. .not. c_associated(c_w_hess_rho)) then
++         call api_error(error%ptr, "contract_cavity_surface_density", "Null array pointer provided")
++         return
++      end if
++
++      select type (cavity => cav%ptr)
++      type is (cavity_type_drop)
++         ngrid = cavity%ngrid
++         call c_f_pointer(c_w_rho, w_rho, [ngrid])
++         call c_f_pointer(c_w_grad_rho, w_grad_rho, [3, ngrid])
++         call c_f_pointer(c_w_hess_rho, w_hess_rho, [3, 3, ngrid])
++         w_rho = 0.0_wp
++         w_grad_rho = 0.0_wp
++         w_hess_rho = 0.0_wp
++         call cavity%require_built(cavity_error)
++         if (allocated(cavity_error)) then
++            call api_error(error%ptr, "contract_cavity_surface_density", cavity_error%message)
++            return
++         end if
++         if (.not. allocated(cavity%lsf_model)) then
++            call api_error(error%ptr, "contract_cavity_surface_density", &
++                           "Level-set model is not initialized")
++            return
++         end if
++         if (.not. cavity%lsf_model%density_adjoint_factor(factor)) return
++         call fill_host_surface_adjoint(acc, ngrid, c_w_xi, c_w_f, c_w_xyz, c_w_n, &
++            & c_w_k1, c_w_k2, c_w_a, c_w_w, c_null_ptr)
++         call cavity%contract_surface_lsf_weights(acc, w_rho, w_grad_rho, w_hess_rho, cavity_error)
++         if (allocated(cavity_error)) then
++            call api_error(error%ptr, "contract_cavity_surface_density", cavity_error%message)
++            return
++         end if
++         w_rho = factor*w_rho
++         w_grad_rho = factor*w_grad_rho
++         w_hess_rho = factor*w_hess_rho
++         dependent = 1
++      class default
++         call api_error(error%ptr, "contract_cavity_surface_density", &
++                        "Cavity is not DROP type - contraction API only supports DROP cavities")
++      end select
++
++   end subroutine contract_cavity_surface_density_api
++
+    !> Contract the direct nuclear term and the host total surface-position weight
+    !>
+    !> - the array behind `c_w_phi` is the potential adjoint `dE/dphi_i`, the

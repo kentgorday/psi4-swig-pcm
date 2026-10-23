@@ -16,6 +16,8 @@ source:
     patches:
       # a missing #include in moist's copy of FINUFFT; clang 23's libc++ needs it
       - patches/0001-finufft-pswf-include-algorithm.patch
+      # host functionals on the surface: the reverse contractions moist runs for its own models
+      - patches/0002-export-surface-adjoint-contractions.patch
   - git: https://github.com/chselz/fclap.git
     tag: v0.1.0
     target_directory: subprojects/fclap
@@ -36,7 +38,7 @@ source:
     target_directory: subprojects/toml-f
 
 build:
-  number: 0
+  number: 1
   # The subprojects are built static, linked into moist's Python extension, and not
   # installed (--skip-subprojects), so they cannot clash with conda-forge packages of the
   # same libraries (mctc-lib, toml-f) in an environment.

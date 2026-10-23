@@ -175,6 +175,16 @@ potential and its Fock matrix.
 - **Build:** moist comes from `packages/moist` (see [The moist package](#the-moist-package)).
   The first `pixi install -e moist` compiles it.
 
+The nonelectrostatic correction (see above) runs on moist's cavities too:
+`MoistSettings(..., nonelectrostatic=NonelectrostaticSettings(...))`, post-SCF or
+self-consistent, with analytic gradients (`nonelectrostatic_drop.py`). Its volume integrals
+are written on moist's surface by the divergence theorem, and its derivatives with respect to
+the surface's points, normals and areas go through moist's own reverse pass to the nuclei and,
+on ρ-DROP, to the density; the moist package here exports that pass (`patches/0002`).
+Energies match tautomator's PySCF implementation to 1e-10 Eh, and gradients match five-point
+differences to ~2e-8 Eh/bohr on SvdW- and ρ-DROP, in both modes (tautomator's
+docs/nonelectrostatic.md has the method and its accuracy).
+
 The code that follows moist's own PySCF host is in `moist_contractions.py`, under moist's
 license (see [License](#license)).
 
@@ -248,8 +258,12 @@ A change to the recipe has to suit both:
   fail to import, or load a system OpenBLAS, wherever the environment selects another
   implementation (MKL, Accelerate).
   `tests/test_moist_build.py` checks the extension's links and the libraries it loads.
-- **Patches.** `patches/` adds an `#include <algorithm>` to moist's copy of FINUFFT that
-  conda-forge's clang 23 (macOS) needs.
+- **Patches.** `patches/0001` adds an `#include <algorithm>` to moist's copy of FINUFFT that
+  conda-forge's clang 23 (macOS) needs.  `patches/0002` exports the reverse contraction of a
+  host functional's surface adjoints (`moist_contract_cavity_surface_gradient` and
+  `_density`, and the cavity methods `contract_surface_gradient` and
+  `contract_surface_density`), which the nonelectrostatic correction's gradients need, here
+  and in tautomator; `tests/test_moist_build.py` checks them.
 
 `pixi run -e moist test-moist` builds and checks it here. tautomator's `pixi.lock` pins the
 commit it builds from; after a change here, `pixi update moist` there moves it.

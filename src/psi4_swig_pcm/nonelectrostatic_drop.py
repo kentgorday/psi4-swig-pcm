@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import moist
 import numpy as np
 from scipy.integrate import lebedev_rule
 
@@ -456,7 +457,18 @@ class DropTerms:
     def energy(self, D: FloatArray) -> Energies:
         return self._evaluate(D).energies
 
+    def _require_contractions(self) -> None:
+        """The surface derivatives need moist's reverse contractions (packages/moist's patch
+        0002); energies do not."""
+        if not hasattr(self.solver.model.cavity, "contract_surface_gradient"):
+            raise RuntimeError(
+                f"moist {moist.__version__} does not export the surface contractions the "
+                "nonelectrostatic correction's gradient and self-consistent Fock matrix need: "
+                "build it from packages/moist, whose patches/0002 adds them"
+            )
+
     def _density_weights(self, out: _Pass) -> Any:
+        self._require_contractions()
         return self.solver.model.cavity.contract_surface_density(
             w_xyz=out.w_xyz, w_n=out.w_n, w_a=out.w_a
         )
@@ -474,6 +486,7 @@ class DropTerms:
         return out.energies, V
 
     def gradient(self, D: FloatArray) -> FloatArray:
+        self._require_contractions()
         out = self._evaluate(D, gradient=True)
         assert out.explicit is not None
         g = out.explicit.copy()

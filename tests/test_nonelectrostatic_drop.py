@@ -40,26 +40,28 @@ FORMATE = np.array(
 
 # tautomator's pyscf_nonelectrostatic_drop on the same calculation: (total energy, (dispersion,
 # exchange, short range)) for the self-consistent and the post-SCF model.  Made on the cavity
-# _settings builds: moist's own default grid, nleb 194, with pruning level 4.  tautomator's
-# pyscf_moist.drop_cavity defaults to nleb 434 since then, so regenerating these from it needs
-# drop_cavity(name, nleb=194) (and IEF-PCM with PCMParameters(solver="DENSE"), the same
-# formate and HF/def2-SVP with exact integrals, and the same correction settings).
+# _settings builds: moist's own default grid, nleb 194, with pruning level 4, on
+# MoistSettings' default radii (modified Bondi x 1.2, PySCF's cavity's spheres).  tautomator's
+# pyscf_moist.drop_cavity builds the same spheres (its drop_radii) but defaults to nleb 434,
+# so regenerating these from it needs drop_cavity(name, nleb=194) (and IEF-PCM with
+# PCMParameters(solver="DENSE"), the same formate and HF/def2-SVP with exact integrals, and
+# the same correction settings).
 PYSCF: dict[tuple[str, bool], tuple[float, tuple[float, float, float]]] = {
     ("svdw", True): (
-        -188.238004715353,
-        (-3.182248184475e-03, 3.424947538641e-03, -1.003031028594e-01),
+        -188.224400420230,
+        (-3.163215564291e-03, 2.322572286314e-03, -8.734236116840e-02),
     ),
     ("svdw", False): (
-        -188.227791998990,
-        (-3.268405431691e-03, 3.732847140768e-03, -7.862833111409e-02),
+        -188.217177128086,
+        (-3.231672634575e-03, 2.607977701534e-03, -7.236861470655e-02),
     ),
     ("rho", True): (
-        -188.233302457221,
-        (-3.161950107420e-03, 3.081148177519e-03, -9.777583374847e-02),
+        -188.233329361999,
+        (-3.161634903037e-03, 3.090845637914e-03, -9.775599707246e-02),
     ),
     ("rho", False): (
-        -188.223707126550,
-        (-3.250745762221e-03, 3.168247320235e-03, -7.649048795413e-02),
+        -188.223755700697,
+        (-3.250269226117e-03, 3.175519368261e-03, -7.653539902741e-02),
     ),
 }
 LSF = {"svdw": lambda: moist.SvdW(), "rho": lambda: moist.Isodensity()}
@@ -122,6 +124,9 @@ def test_gradient_matches_finite_differences(cavity: str, self_consistent: bool)
         mol = psi4_molecule("formate", displaced(FORMATE, atom, axis, step))
         return float(psi4.energy("hf", molecule=mol))
 
+    # A small step: moist's pruning (level 4) gives the correction's energy features ~1e-3
+    # bohr wide (on these spheres, at this geometry: g[0, 0] is 2e-6 off differences at 2e-3,
+    # 7e-10 at 2.5e-4, and with no pruning 2e-11 at either)
     for atom, axis in ((0, 0), (1, 1), (2, 2), (3, 0)):
-        fd = five_point(partial(energy_at, atom, axis), 2e-3)
+        fd = five_point(partial(energy_at, atom, axis), 2.5e-4)
         assert g[atom, axis] == pytest.approx(fd, abs=5e-8)

@@ -139,6 +139,14 @@ psi4_swig_pcm.enable(MoistSettings(
 psi4.optimize("pbe0")
 ```
 
+The cavity is built on `MoistSettings.radii`: like `PCMSettings.radii` (sphere radii in bohr
+by atomic number), with the same default, modified Bondi × 1.2 and H 1.10 Å, so a moist cavity
+has the switching/Gaussian cavity's spheres rather than moist's own CPCM radii (up to 13%
+smaller on the p-block elements, a third off on the alkali metals, Cu and Zn). Leave the
+cavity's own `radii=` unset; a cavity given other radii is refused, and `radii=None` keeps the
+cavity's, e.g. one of moist's sets. On ρ-DROP the radii only place the points of the density's
+contour.
+
 moist owns the cavity and the model. It asks Psi4 for quantities on its cavity grid, and Psi4
 contracts what moist returns with its own integrals:
 

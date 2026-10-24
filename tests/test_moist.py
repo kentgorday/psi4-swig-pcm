@@ -8,6 +8,7 @@ comparisons in moist-crosscheck (pixi run -e moist-crosscheck crosscheck-moist).
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import os
 import weakref
@@ -22,6 +23,7 @@ import pytest
 from psi4 import core
 
 import psi4_swig_pcm
+from psi4_swig_pcm.cavity import modified_bondi_radii
 from psi4_swig_pcm.charges import GaussianCharges
 from tests.helpers import HF_OPTIONS, as_array, displaced, five_point, psi4_molecule
 from tests.molecules import MOLECULES
@@ -114,6 +116,31 @@ def test_settings_are_checked() -> None:
         MoistSettings(cavity=cavity, components=())
     with pytest.raises(TypeError, match="components"):
         MoistSettings(cavity=cavity, components=(object(),))
+
+
+@pytest.mark.parametrize("cavity", list(CAVITIES))
+def test_cavity_is_built_on_the_pcm_spheres(cavity: str) -> None:
+    """MoistSettings.radii, as PCMSettings.radii and with its default, go into moist's cavity
+    in place of moist's own CPCM radii; radii=None keeps the cavity's."""
+    component = (COMPONENTS["cpcm"](),)
+    s = MoistSettings(cavity=CAVITIES[cavity](), components=component)
+    radii = s.radii
+    assert radii is not None and radii == psi4_swig_pcm.PCMSettings().radii
+    assert s.cavity.radii == moist.CustomRadii(radii[1:], numbers=range(1, len(radii)))
+    assert dataclasses.replace(s, nthreads=2).cavity == s.cavity
+    wider = MoistSettings(
+        cavity=CAVITIES[cavity](),
+        components=component,
+        radii=modified_bondi_radii(hydrogen=1.2),  # type: ignore[arg-type]  # any sequence
+    ).radii
+    assert wider is not None and wider[1] == pytest.approx(radii[1] * 1.2 / 1.1)
+    assert wider[2:] == radii[2:]
+    own = MoistSettings(cavity=CAVITIES[cavity](), components=component, radii=None)
+    assert own.cavity.radii == moist.CPCMRadii() and own.radii is None
+    bondi = dataclasses.replace(CAVITIES[cavity](), radii=moist.BondiRadii())
+    with pytest.raises(ValueError, match="radii of its own"):
+        MoistSettings(cavity=bondi, components=component)
+    assert MoistSettings(cavity=bondi, components=component, radii=None).cavity == bondi
 
 
 @pytest.mark.parametrize("cavity", list(CAVITIES))
@@ -307,7 +334,7 @@ def test_matches_moist_pyscf_host(cavity: str, component: str, name: str) -> Non
         basis="def2-svp", charge=m.charge, spin=m.multiplicity - 1, verbose=0,
     )  # fmt: skip
     mf = mol.HF().MOIST(
-        cavity=CAVITIES[cavity](),
+        cavity=settings(cavity, component).cavity,  # on the same spheres
         components=[COMPONENTS[component]()],
         context=moist.Context(nthreads=4, verbosity=0),
     )

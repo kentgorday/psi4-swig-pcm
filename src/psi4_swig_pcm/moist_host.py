@@ -23,6 +23,9 @@ cavity.  This module is that host for Psi4, as moist.pyscf is for PySCF:
     ))
     psi4.optimize("b3lyp-d3bj")
 
+The cavity is built on MoistSettings.radii, by default the switching/Gaussian cavity's spheres
+(cavity.modified_bondi_radii(), as PCMSettings.radii), not moist's own CPCM radii.
+
 The plumbing into Psi4 is driver.enable(): the solver sits in Psi4's DDX slot, and the SCF
 gradient is Psi4's own gas-phase-form gradient at the solvated density plus gradient().
 
@@ -53,6 +56,7 @@ work on every cavity.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -87,6 +91,15 @@ class MoistSettings:
     isodensity cavity's grid moves every SCF iteration, so they are rebuilt each time.
     nonelectrostatic: the nonelectrostatic correction on moist's surface
     (nonelectrostatic_drop), post-SCF or self-consistent as its settings say, or None.
+    radii: the cavity's sphere radii in bohr by atomic number (index 0 unused), any sequence,
+    as PCMSettings.radii and with its default, cavity.modified_bondi_radii() (PySCF's modified
+    Bondi x 1.2, hydrogen 1.10 A): moist's cavity is built on them (as moist.CustomRadii)
+    rather than on moist's own CPCM radii, so that it has the same spheres as the
+    switching/Gaussian cavity.  The cavity must then be left on moist's default radii
+    (moist.DROP(...) without radii=, which moist cannot tell from radii=moist.CPCMRadii());
+    a cavity given other radii is refused, so that the radii come from one place.  None
+    keeps the cavity's own radii, e.g. one of moist's sets.  An isodensity surface is the
+    density's contour; there the radii only place its points.
     """
 
     cavity: Any
@@ -95,6 +108,7 @@ class MoistSettings:
     verbosity: int = 0
     incore_mb: float = DEFAULT_INCORE_MB
     nonelectrostatic: NonelectrostaticSettings | None = None
+    radii: tuple[float, ...] | None = field(default_factory=_solver._default_radii)
 
     def __post_init__(self) -> None:
         if not isinstance(self.cavity, moist.CavityConfiguration):
@@ -105,6 +119,24 @@ class MoistSettings:
         ):
             raise TypeError("components must be a nonempty sequence of moist components")
         object.__setattr__(self, "components", components)
+        if self.radii is not None:
+            radii = tuple(float(r) for r in self.radii)
+            cavity: Any = self.cavity
+            takes_radii = dataclasses.is_dataclass(cavity) and hasattr(cavity, "radii")
+            if not takes_radii:
+                raise TypeError(
+                    f"{type(self.cavity).__name__} takes no radii; pass radii=None to keep its own"
+                )
+            custom = moist.CustomRadii(radii[1:], numbers=range(1, len(radii)))
+            # (custom: these settings again, e.g. through dataclasses.replace)
+            if self.cavity.radii not in (moist.CPCMRadii(), custom):
+                raise ValueError(
+                    f"the cavity has radii of its own ({self.cavity.radii!r}): give them as "
+                    "MoistSettings.radii (by atomic number, in bohr), or pass radii=None to "
+                    "keep the cavity's"
+                )
+            object.__setattr__(self, "radii", radii)
+            object.__setattr__(self, "cavity", dataclasses.replace(cavity, radii=custom))
 
 
 # ------------------------------------------------------------------ the basis as moist sees it

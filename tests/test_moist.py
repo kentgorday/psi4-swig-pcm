@@ -260,7 +260,7 @@ def test_gradient_matches_finite_differences(
 def test_dft_optimization_converges() -> None:
     psi4.set_options({"basis": "def2-svp", "scf_type": "df", "g_convergence": "gau_tight"})
     psi4_swig_pcm.enable(settings("svdw"))
-    mol = psi4_molecule("formate")
+    mol = psi4_molecule("formate", off_axis=True)  # an optimization (helpers.OFF_AXIS)
     psi4.optimize("pbe0", molecule=mol)
     g = as_array(psi4.gradient("pbe0", molecule=mol))
     assert np.abs(g).max() < 1e-4
@@ -285,7 +285,7 @@ def test_frequencies_from_gradients_match_energies(cavity: str) -> None:
     """psi4.frequency at a tightly optimized geometry: finite differences of moist gradients
     against finite differences of energies (as test_driver's for the switching/Gaussian PCM)."""
     psi4.set_options({**HF_OPTIONS, "g_convergence": "gau_verytight", "geom_maxiter": 50})
-    mol = psi4_molecule("formate")
+    mol = psi4_molecule("formate", off_axis=True)  # an optimization (helpers.OFF_AXIS)
     psi4_swig_pcm.enable(settings(cavity))
     psi4.optimize("hf", molecule=mol)
     assert np.abs(as_array(psi4.gradient("hf", molecule=mol))).max() < 2e-6

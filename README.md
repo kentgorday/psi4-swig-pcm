@@ -232,6 +232,7 @@ pixi run -e crosscheck crosscheck   # against PySCF 2.11 (~3 min)
 pixi run -e moist test-moist        # the moist package and host (compiles moist the first time)
 pixi run -e moist test-moist-slow   # moist host: finite differences, an optimization (~2 min)
 pixi run -e moist-crosscheck crosscheck-moist   # moist host against moist's PySCF host
+pixi run -e accelerate test        # on Apple's Accelerate (osx-arm64, macOS 27.2 and later)
 pixi run check              # ruff, ruff format, mypy --strict
 ```
 
@@ -261,10 +262,10 @@ A change to the recipe has to suit both:
   tautomator's environment.
 - **BLAS/LAPACK from the environment.** The recipe builds against the netlib variants of
   `libblas`/`liblapack`, as conda-forge's own builds do, so moist runs on whatever the
-  environment selects: OpenBLAS here and in tautomator on osx-arm64, MKL in tautomator on
-  linux-64. Built against the default OpenBLAS variants, it would link `libopenblas`, then
-  fail to import, or load a system OpenBLAS, wherever the environment selects another
-  implementation (MKL, Accelerate).
+  environment selects: OpenBLAS here and in tautomator on osx-arm64 (Accelerate in the
+  `accelerate` environments), MKL in tautomator on linux-64. Built against the default
+  OpenBLAS variants, it would link `libopenblas`, then fail to import, or load a system
+  OpenBLAS, wherever the environment selects another implementation (MKL, Accelerate).
   `tests/test_moist_build.py` checks the extension's links and the libraries it loads.
 - **Patches.** `patches/0001` adds an `#include <algorithm>` to moist's copy of FINUFFT that
   conda-forge's clang 23 (macOS) needs.  `patches/0002` exports the reverse contraction of a

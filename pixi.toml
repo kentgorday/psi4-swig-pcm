@@ -1,12 +1,25 @@
 [workspace]
 channels = ["conda-forge"]
 name = "psi4-swig-pcm"
-platforms = ["osx-arm64", "linux-64"]
+platforms = [
+    "osx-arm64",
+    "linux-64",
+    # Only the accelerate environment runs here (see [feature.accelerate]).  A platform that
+    # carries a virtual package needs a name of its own.
+    { name = "osx-arm64-macos-27-2", platform = "osx-arm64", macos = "27.2" },
+]
 # Building this package (and depending on it from source, as tautomator does) uses pixi-build,
 # still a preview feature in pixi 0.82.
 preview = ["pixi-build"]
 # pixi-build-python 0.8 speaks build API 5 and up, which pixi accepts from 0.71.
 requires-pixi = ">=0.71.0"
+
+# The macOS that source builds (this package, moist) target.  pixi-build takes it from the
+# platform's macOS, which on the 27.2 platform is newer than any conda-forge deployment target
+# (26.0 at most), so that solve fails without this.  13.0 is what the plain osx-arm64 platform
+# gets anyway, so every environment builds the same packages.
+[workspace.target.osx-arm64.build-variants]
+c_stdlib_version = ["13.0"]
 
 # ------------------------------------------------------------------ the conda package
 # Name and version come from pyproject.toml; pixi-build-python runs scikit-build-core,
@@ -54,7 +67,24 @@ ruff = ">=0.11,<1"
 # BLAS/LAPACK is conda-forge's default (OpenBLAS on both platforms), as in tautomator; not
 # Apple's Accelerate, whose dpotrf on the upper triangle (scipy's cholesky(lower=True), which
 # cavity.PCMOperator.diagnostics calls) reads and writes outside its matrix for orders of
-# about 1450-5500 on macOS 27.0.1, in both of its LAPACK interfaces (tautomator's README).
+# about 1450-5500 before macOS 27.2, in both of its LAPACK interfaces (tautomator's README).
+
+# The platforms of every environment but accelerate: all but the macOS 27.2 one.  An
+# environment gets the platforms its features have in common, and a feature that names none
+# gets them all, so without this each would also be solved for macOS 27.2.
+[feature.default-blas]
+platforms = ["osx-arm64", "linux-64"]
+
+# Apple's Accelerate instead of OpenBLAS, on osx-arm64 from macOS 27.2, where Apple fixed the
+# dpotrf bug above (scipy/scipy#26145), as in tautomator's accelerate environments.  It still
+# writes into the lower triangle when it factors the upper one, so there scipy's
+# cholesky(lower=True) returns a matrix that is not triangular; diagnostics only asks whether
+# it succeeds.  On an older macOS, installing it stops with a virtual-package error.
+[feature.accelerate]
+platforms = ["osx-arm64-macos-27-2"]
+
+[feature.accelerate.dependencies]
+libblas = { version = "*", build = "*_newaccelerate" }
 
 [tasks]
 lint = "ruff check src/ tests/"
@@ -97,7 +127,10 @@ test-moist-slow = { cmd = "pytest -m 'moist and slow and not pyscf'", env = { OM
 crosscheck-moist = { cmd = "pytest -m 'moist and pyscf'", env = { OMP_NUM_THREADS = "4" } }
 
 [environments]
-crosscheck = ["crosscheck"]
-moist = ["moist"]
+default = ["default-blas"]
+crosscheck = ["crosscheck", "default-blas"]
+moist = ["moist", "default-blas"]
 # moist's own PySCF host as the reference for this Psi4 host
-moist-crosscheck = ["moist", "crosscheck", "moist-crosscheck"]
+moist-crosscheck = ["moist", "crosscheck", "moist-crosscheck", "default-blas"]
+# The default environment on Accelerate (osx-arm64, macOS 27.2 and later)
+accelerate = ["accelerate"]

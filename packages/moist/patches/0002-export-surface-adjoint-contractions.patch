@@ -18,10 +18,10 @@ DROP cavity methods (contract_surface_gradient/_density).  Nothing existing
 changes.
 
 diff --git a/include/moist.h b/include/moist.h
-index 6e9be9b..3cff8a8 100644
+index 0c7a2ef..9dca0c2 100644
 --- a/include/moist.h
 +++ b/include/moist.h
-@@ -1604,6 +1604,58 @@ moist_contract_surface_lsf_weights_extended(
+@@ -1610,6 +1610,58 @@ moist_contract_surface_lsf_weights_extended(
                                     const double* w_k1 /* [ngrid] or NULL */,
                                     const double* w_k2 /* [ngrid] or NULL */) moist_API_SUFFIX__V_1_0;
  
@@ -121,10 +121,10 @@ index 2f87281..5ce128f 100644
      def nmax(self) -> int:
          return self.snapshot().nmax
 diff --git a/python/moist/library.py b/python/moist/library.py
-index c1be191..e20eb28 100644
+index c2107fd..6666729 100644
 --- a/python/moist/library.py
 +++ b/python/moist/library.py
-@@ -1378,6 +1378,80 @@ def contract_surface_lsf_weights(
+@@ -1381,6 +1381,80 @@ def contract_surface_lsf_weights(
      return w_lsf0, w_lsf1, w_lsf2
  
  
@@ -206,10 +206,10 @@ index c1be191..e20eb28 100644
      return ffi.new("char[]", value.encode()) if value is not None else ffi.NULL
  
 diff --git a/src/moist/api.f90 b/src/moist/api.f90
-index f4ac785..c02006c 100644
+index e269a21..e94f079 100644
 --- a/src/moist/api.f90
 +++ b/src/moist/api.f90
-@@ -437,6 +437,7 @@ module moist_api
+@@ -439,6 +439,7 @@ module moist_api
     public :: get_anchor_gradient_api
     public :: get_cavity_gradient_api
     public :: contract_surface_lsf_weights_api, contract_surface_lsf_weights_extended_api
@@ -217,7 +217,7 @@ index f4ac785..c02006c 100644
     public :: contract_pcm_nuclear_gradient_api
  
  contains
-@@ -6953,6 +6954,201 @@ contains
+@@ -6963,6 +6964,201 @@ contains
  
     end subroutine contract_surface_lsf_weights_extended_api
  

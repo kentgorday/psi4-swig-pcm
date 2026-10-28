@@ -352,10 +352,12 @@ def test_matches_moist_pyscf_host(cavity: str, component: str, name: str) -> Non
 
 @pytest.mark.parametrize("component", ["cpcm", "iefpcm"])
 def test_apparent_charges_are_published(component: str) -> None:
-    """packages/moist's patch 0003: a PCM component publishes its apparent surface charges q.
+    """moist (from 1.2) publishes a PCM component's potential adjoint, and a layer model's
+    apparent surface charges q, as named results.
 
-    For C-PCM they are the potential adjoint the host contracts (w_phi); for IEF-PCM w_phi is
-    the symmetrized adjoint and q differs from it, but either gives the energy, 1/2 q . phi.
+    `potential_adjoint` is the w_phi the host contracts.  For C-PCM that is q itself, and moist
+    publishes no separate `surface_charge`; for IEF-PCM w_phi is the symmetrized adjoint and q
+    (`surface_charge`) differs from it, but either gives the energy, 1/2 q . phi.
     """
     psi4.set_options(HF_OPTIONS)
     psi4_swig_pcm.enable(settings("svdw", component))
@@ -363,18 +365,22 @@ def test_apparent_charges_are_published(component: str) -> None:
         _e, wfn = psi4.energy("hf", molecule=psi4_molecule("formate"), return_wfn=True)
         sol = wfn.ddx
         view = sol.model.components[0]
-        q = np.asarray(view.get("q"))
+        published = {f.name for f in view.fields()}
         w_phi = sum(
             np.asarray(i.w_phi)
             for i in sol.response
             if isinstance(i, moist.PotentialAdjointResponse)
         )
+        np.testing.assert_allclose(
+            np.asarray(view.get("potential_adjoint")), w_phi, rtol=0, atol=1e-14
+        )
+        if component == "cpcm":
+            assert "surface_charge" not in published
+            q = np.asarray(view.get("potential_adjoint"))
+        else:
+            q = np.asarray(view.get("surface_charge"))
+            assert np.abs(q - w_phi).max() > 1e-6 * np.abs(q).max()
         phi = sol.nuc[0] + np.asarray(sol.charges.esp(sol.basis, sol.D))
         assert 0.5 * q @ phi == pytest.approx(sol.energy, abs=1e-8)
-        if component == "cpcm":
-            np.testing.assert_array_equal(q, w_phi)
-        else:
-            np.testing.assert_allclose(np.asarray(view.get("qsym")), w_phi, rtol=0, atol=1e-14)
-            assert np.abs(q - w_phi).max() > 1e-6 * np.abs(q).max()
     finally:
         psi4_swig_pcm.disable()

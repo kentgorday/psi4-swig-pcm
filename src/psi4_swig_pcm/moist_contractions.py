@@ -1,9 +1,9 @@
 # Adapted from moist's PySCF host, python/moist/pyscf.py in moist 1.1.0-alpha.1
 # (https://github.com/lukaswittmann/moist, by Lukas Wittmann): PySCFHost._fock_lsf,
 # PySCFHost._gradient_lsf, and the nuclear terms of PySCFHost.surface_potential, _grad_phi_nuc
-# and _dphi_dxi.  Modified by Kent Gorday, 2026, for Psi4's basis functions (moist_host): the
-# basis values come in as arrays, a block of grid points at a time, and the Fock term is built
-# from matrix products.
+# and _dphi_dxi (all five unchanged in moist 1.2.0-alpha).  Modified by Kent Gorday, 2026, for
+# Psi4's basis functions (moist_host): the basis values come in as arrays, a block of grid
+# points at a time, and the Fock term is built from matrix products.
 #
 # SPDX-License-Identifier: MPL-2.0
 #

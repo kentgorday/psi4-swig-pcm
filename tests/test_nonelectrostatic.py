@@ -50,9 +50,11 @@ def _molecule(xyz_angstrom: FloatArray) -> Any:
     return psi4.geometry("\n".join(lines))
 
 
-def _basis(xyz_angstrom: FloatArray, basis: str = "6-31g*") -> tuple[Any, Any]:
+def _basis(
+    xyz_angstrom: FloatArray, basis: str = "6-31g*", puream: bool = False
+) -> tuple[Any, Any]:
     mol = _molecule(xyz_angstrom)
-    psi4.set_options({**OPTIONS, "basis": basis})
+    psi4.set_options({**OPTIONS, "basis": basis, "puream": puream})
     return mol, core.Wavefunction.build(mol, core.get_global_option("BASIS")).basisset()
 
 
@@ -74,9 +76,12 @@ def _density(wfn: Any) -> FloatArray:
 
 
 class TestFieldIntegrals:
-    @pytest.fixture()
-    def setup(self) -> tuple[Any, Any, FloatArray, FloatArray, FloatArray]:
-        mol, basis = _basis(FORMATE, "cc-pvtz")  # s to f functions
+    # s to f functions, Cartesian and spherical: the extension takes libint2's integrals of
+    # spherical shells in whatever order libint2 gives them, which it must find out itself
+    # (nonelectrostatic.cpp, pure_order)
+    @pytest.fixture(params=[False, True], ids=["cartesian", "spherical"])
+    def setup(self, request: Any) -> tuple[Any, Any, FloatArray, FloatArray, FloatArray]:
+        mol, basis = _basis(FORMATE, "cc-pvtz", puream=request.param)
         rng = np.random.default_rng(0)
         points = rng.normal(scale=2.0, size=(3, 3))
         points += 3.0 * np.sign(points)
@@ -136,9 +141,10 @@ class TestFieldIntegrals:
             plus, minus = FORMATE.copy(), FORMATE.copy()
             plus[atom, axis] += h * BOHR
             minus[atom, axis] -= h * BOHR
+            puream = basis.has_puream()
             numeric = (
-                energy(_basis(plus, "cc-pvtz")[1], points)
-                - energy(_basis(minus, "cc-pvtz")[1], points)
+                energy(_basis(plus, "cc-pvtz", puream)[1], points)
+                - energy(_basis(minus, "cc-pvtz", puream)[1], points)
             ) / (2 * h)
             assert atoms[atom, axis] == pytest.approx(numeric, rel=1e-6, abs=1e-9)
 

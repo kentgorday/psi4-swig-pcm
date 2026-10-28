@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifdef _OPENMP
@@ -68,28 +69,62 @@ int thread_rank() {
 struct Shells {
     std::vector<libint2::Shell> shells;
     std::vector<int> offset, size, center;
-    // order[M][f]: the position, in libint2's output for shell M, of Psi4's function f.
-    // libint2 here orders solid harmonics m = -l..l (LIBINT_SHGSHELL_ORDERING_STANDARD);
-    // Psi4 orders them m = 0, +1, -1, +2, -2, ...  Cartesian shells share one order.
+    // order[M][f]: the position, in libint2's output for shell M, of Psi4's function f
+    // (psi4_order).  Cartesian shells share one order.
     std::vector<std::vector<int>> order;
     int nbf = 0;
     std::size_t max_nprim = 0;
     int max_l = 0;
 };
 
+// order[f]: the row of libint2's solid-harmonic table, i.e. the position in its output, that
+// holds Psi4's function f of a pure shell.  Psi4 orders them m = 0, +1, -1, ..., +l, -l.
+// libint2's order (m = -l..l by default, or Psi4's) is a process-wide setting, fixed in the
+// table when it is first built, and every Engine transforms with that table.  Which table this
+// extension gets depends on the platform's loader: on linux-64 it is one symbol shared with
+// Psi4's core, already in Psi4's order, while libint2's accessor for the setting is not shared
+// and says m = -l..l.  So nothing is assumed: each row is matched to its m with libint2's own
+// coefficient formula.
+std::vector<int> pure_order(int l) {
+    using Coefficients = libint2::solidharmonics::SolidHarmonicsCoefficients<double>;
+    const auto& table = Coefficients::instance(static_cast<unsigned int>(l));
+    const int npure = 2 * l + 1, ncart = (l + 1) * (l + 2) / 2;
+    std::vector<int> order(npure, -1);
+    for (int r = 0; r < npure; r++) {
+        std::vector<double> row(ncart, 0.0);
+        for (unsigned int k = 0; k < table.nnz(r); k++) row[table.row_idx(r)[k]] = table.row_values(r)[k];
+        int match = -1;
+        double best = 0.0;
+        for (int f = 0; f < npure; f++) {
+            const int m = f % 2 ? (f + 1) / 2 : -(f / 2);  // Psi4's f-th function
+            double dot = 0.0, nrow = 0.0, nm = 0.0;
+            int c = 0, lx, ly, lz;
+            FOR_CART(lx, ly, lz, l)
+            const double v = Coefficients::coeff(l, m, lx, ly, lz);
+            dot += v * row[c];
+            nrow += row[c] * row[c];
+            nm += v * v;
+            ++c;
+            END_FOR_CART
+            const double cosine = dot / std::sqrt(nrow * nm);
+            if (cosine > best) {
+                best = cosine;
+                match = f;
+            }
+        }
+        if (match < 0 || best < 1.0 - 1e-10 || order[match] != -1)
+            throw std::runtime_error("libint2's solid harmonics of l = " + std::to_string(l) +
+                                     " are not in an order this extension recognizes");
+        order[match] = r;
+    }
+    return order;
+}
+
 std::vector<int> psi4_order(const libint2::Shell& sh) {
     const int l = sh.contr[0].l;
-    const int nf = static_cast<int>(sh.size());
-    std::vector<int> order(nf);
-    if (!sh.contr[0].pure || l == 0) {
-        for (int f = 0; f < nf; f++) order[f] = f;
-        return order;
-    }
-    order[0] = l;  // m = 0
-    for (int j = 1; j <= l; j++) {
-        order[2 * j - 1] = l + j;  // m = +j
-        order[2 * j] = l - j;      // m = -j
-    }
+    if (sh.contr[0].pure && l > 0) return pure_order(l);
+    std::vector<int> order(sh.size());
+    for (std::size_t f = 0; f < order.size(); f++) order[f] = static_cast<int>(f);
     return order;
 }
 

@@ -86,7 +86,8 @@ class MoistSettings:
     cavity: moist.DROP(lsf=moist.SvdW() | moist.CFC() | moist.Isodensity(), ...) or moist.ISwiG().
     components: e.g. (moist.ModelComponentCPCM(78.3553),).
     nthreads: moist's OpenMP threads; 0 takes Psi4's.
-    verbosity: moist's own printout, which goes to the process's stdout (0 = silent).
+    verbosity: moist's own printout, which goes to the process's stdout (0 = silent).  Its
+    warnings print at every verbosity, to stdout and, copied, to stderr.
     incore_mb: as PCMSettings.incore_mb: the (k|mn) of a grid are stored if they fit.  An
     isodensity cavity's grid moves every SCF iteration, so they are rebuilt each time.
     nonelectrostatic: the nonelectrostatic correction on moist's surface
@@ -341,8 +342,12 @@ class MoistSolver:
         self.Z = np.array([molecule.Z(int(i)) for i in self.atoms], dtype=np.float64)
         numbers = np.array([molecule.true_atomic_number(int(i)) for i in self.atoms])
         self.nthreads = core.get_num_threads()
+        # moist prints its warnings to stdout, among Psi4's; a copy on stderr keeps them
+        # with Psi4's errors and this package's own warnings.
         self.context = moist.Context(
-            nthreads=settings.nthreads or self.nthreads, verbosity=settings.verbosity
+            nthreads=settings.nthreads or self.nthreads,
+            verbosity=settings.verbosity,
+            warnings_to_stderr=True,
         )
         self.aos: CartesianAOs | None = None
         if self.density_dependent:

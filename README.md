@@ -279,8 +279,9 @@ A change to the recipe has to suit both:
   from its symmetrized w_phi.  tautomator's nonelectrostatic descriptors read q;
   `tests/test_moist.py` checks both.)
 
-`pixi run -e moist test-moist` builds and checks it here. tautomator's `pixi.lock` pins the
-commit it builds from; after a change here, `pixi update moist` there moves it.
+`pixi run -e moist test-moist` builds and checks it here. tautomator builds it from the
+commit its `pixi.toml` pins (`rev`, the same for `moist` and `psi4-swig-pcm`); after a
+change here, move both there and re-lock (`pixi lock`).
 
 ## Memory
 

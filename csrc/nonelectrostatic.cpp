@@ -84,7 +84,9 @@ struct Shells {
 // extension gets depends on the platform's loader: on linux-64 it is one symbol shared with
 // Psi4's core, already in Psi4's order, while libint2's accessor for the setting is not shared
 // and says m = -l..l.  So nothing is assumed: each row is matched to its m with libint2's own
-// coefficient formula.
+// coefficient formula.  The table is built on its first use, in the order its first user's
+// setting says; were that this extension's m = -l..l, Psi4's own integrals would take it too,
+// so the module sets this extension's setting to Psi4's order when it loads (PYBIND11_MODULE).
 std::vector<int> pure_order(int l) {
     using Coefficients = libint2::solidharmonics::SolidHarmonicsCoefficients<double>;
     const auto& table = Coefficients::instance(static_cast<unsigned int>(l));
@@ -910,6 +912,9 @@ py::tuple ray_adjoint(Array xyz, Array normals, Array areas, Array centres, IntA
 
 PYBIND11_MODULE(_nonelectrostatic, m) {
     py::module_::import("psi4.core");
+    // Before any Engine: a solid-harmonic table this extension builds is then in Psi4's order
+    // (pure_order).
+    libint2::set_solid_harmonics_ordering(libint2::SHGShellOrdering_Gaussian);
     namespace ne = psi::nonelectrostatic;
     m.def("field_matrix_packed_into", &ne::field_matrix_packed_into, py::arg("basis"), py::arg("points"),
           py::arg("normals"), py::arg("out").noconvert(), py::arg("nthreads"));

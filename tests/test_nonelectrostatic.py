@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -147,6 +150,40 @@ class TestFieldIntegrals:
                 - energy(_basis(minus, "cc-pvtz", puream)[1], points)
             ) / (2 * h)
             assert atoms[atom, axis] == pytest.approx(numeric, rel=1e-6, abs=1e-9)
+
+
+# A fresh process whose first spherical integrals are the extension's: a bare BasisSet, unlike
+# Wavefunction.build, has Psi4 compute none first.
+_EXTENSION_FIRST = """
+import numpy as np, psi4
+from psi4 import core
+from psi4_swig_pcm import _nonelectrostatic as _ne
+core.be_quiet()
+mol = psi4.geometry(
+    "0 1\\nsymmetry c1\\nno_com\\nno_reorient\\nO 0 0 0.1\\nH 0 0.75 -0.5\\nH 0 -0.75 -0.5"
+)
+basis = core.BasisSet.build(mol, "ORBITAL", "cc-pvdz", puream=True)
+p, n = [3.0, 0.4, -0.7], np.array([0.6, 0.0, 0.8])
+mine = _ne.normal_field_matrix(basis, np.array([p]), n[None], np.array([1.0]), 1)
+field = core.MintsHelper(basis).electric_field(p)
+print(np.abs(mine - sum(n[x] * field[x].np for x in range(3))).max())
+"""
+
+
+def test_extension_first_leaves_psi4_in_its_order(tmp_path: Path) -> None:
+    # libint2 builds its solid-harmonic table on first use, in its first user's order, and on
+    # linux-64 the extension shares it with Psi4's core.  Built in libint2's default order, it
+    # would put every later Psi4 integral of the process out of Psi4's order (B3LYP/def2-SVP
+    # water: -103.24 Eh, not -76.36).
+    out = subprocess.run(
+        [sys.executable, "-c", _EXTENSION_FIRST],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert float(out.stdout.split()[-1]) < 1e-12
 
 
 class TestKernelAndGrids:

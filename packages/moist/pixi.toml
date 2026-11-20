@@ -10,7 +10,7 @@
 
 [package]
 name = "moist"
-version = "1.2.0a0"
+version = "1.2.1a0"
 
 [package.build]
 backend = { name = "pixi-build-rattler-build", version = "*" }

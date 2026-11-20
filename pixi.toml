@@ -11,8 +11,9 @@ platforms = [
 # Building this package (and depending on it from source, as tautomator does) uses pixi-build,
 # still a preview feature in pixi 0.82.
 preview = ["pixi-build"]
-# pixi-build-python 0.8 speaks build API 5 and up, which pixi accepts from 0.71.
-requires-pixi = ">=0.71.0"
+# pixi-build-python 0.8 speaks build API 5 and up, which pixi accepts from 0.71; the package's
+# pin-compatible run dependencies (below) need 0.77.
+requires-pixi = ">=0.77.0"
 
 # The macOS that source builds (this package, moist) target.  pixi-build takes it from the
 # platform's macOS, which on the 27.2 platform is newer than any conda-forge deployment target
@@ -31,9 +32,11 @@ config = { noarch = false, compilers = ["cxx"] }
 
 [package.host-dependencies]
 python = "3.13.*"
-# The Psi4 the extension is compiled against.  Psi4 run-exports psi4 >=1.11,<1.12 to the
-# built package.
+# The Psi4 the extension is compiled against (its headers, and psi4.core's symbols at import).
 psi4 = "1.11.*"
+# _nonelectrostatic compiles libint2's header-only engine and links libint2; it comes with
+# Psi4, which requires one exact libint build, but the extension uses it directly too.
+libint = "*"
 pybind11 = "*"
 # psi4/libmints/matrix.h includes Eigen, so the extension compiles against its headers (no
 # Eigen code ends up in the binary).  conda-forge's psi4 1.11 is built with Eigen 5.0; keep
@@ -46,8 +49,16 @@ cmake = ">=3.19"
 ninja = "*"
 
 [package.run-dependencies]
-# The same pin as Psi4's run-export, stated in case that export ever changes.
-psi4 = "1.11.*"
+# Exactly the Psi4 and libint builds the extension was compiled against (version and build
+# string, from the host environment).  pixi solves a source package's host environment on its
+# own, newest first, so without this an environment that keeps an older Psi4 build runs the
+# extension on a Psi4 other than its headers'.  With it the two move together: `pixi update
+# psi4`, or a new `rev` of this repository and `pixi lock`, rebuilds the extension against the
+# newest Psi4 and moves the environment to that Psi4.  To hold an environment back, name the
+# build in the workspace's build variants (`[workspace.build-variants] psi4 = ["1.11 *_3"]`);
+# a pin in its dependencies alone conflicts with the newer host.
+psi4 = { pin-compatible = { exact = true } }
+libint = { pin-compatible = { exact = true } }
 numpy = "*"
 scipy = ">=1.15"
 

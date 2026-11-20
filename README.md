@@ -200,8 +200,14 @@ license (see [License](#license)).
 
 The package builds a C++ extension against Psi4's headers, through Psi4's CMake plugin
 interface. It only works with the Psi4 it was built against, so it is a conda package built
-by [pixi-build](https://pixi.sh). That package declares `psi4 >=1.11,<1.12` (Psi4
-run-exports it), and the extension also refuses to import under a different Psi4.
+by [pixi-build](https://pixi.sh). That package requires exactly the Psi4 and libint builds
+it was compiled against (`pin-compatible`, pixi 0.77 or later), and the extension also
+refuses to import under a different Psi4 version. pixi solves the package's build environment
+on its own, newest first, and the exact pin makes the environment follow it: `pixi update
+psi4`, or a new `rev` and `pixi lock`, rebuilds the extension against the newest Psi4 build
+and moves the environment to it. To keep an older Psi4 build, name it in the consuming
+workspace's build variants (`[workspace.build-variants] psi4 = ["1.11 *_3"]`); a version pin
+in its dependencies alone conflicts with the newer build the package was compiled against.
 
 From another pixi workspace, for example the `psi4` environment of tautomator, the pKa
 workflow this package was written for:
